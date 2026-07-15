@@ -1,46 +1,82 @@
-//! flowrun-gui — desktop native (egui). Menggambar graf mermaid via flowmaid
-//! `scene` API, menjalankan engine di worker thread, dan menyorot progres
-//! (idle → current → ok/fail) langsung di canvas. Tombol Next/Auto/Skip/Reset.
+//! flowrun-gui — desktop native (egui). Aplikasi mandiri: buka flow dari dalam
+//! app (picker + recent), edit koneksi/token di UI, canvas flowmaid (pan/zoom/
+//! follow, panah, label wrap, pulse), log riwayat, JSON tree, re-run per node.
+//!
+//! Pembagian peran: flowmaid = layout graf · egui = render + kontrol ·
+//! engine flowrun = eksekusi HTTP (worker thread, UI tetap responsif).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 
-use flowrun::config;
+use flowrun::config::{self, EnvConfig};
 use flowrun::engine::{run_step, Ctx, Outcome};
 use flowrun::flow::{self, FlowStep};
 
+// ============================= CLI =============================
+
 #[derive(Parser)]
-#[command(name = "flowrun-gui", about = "flowrun desktop (egui) — visual flow runner")]
+#[command(name = "flowrun-gui", about = "flowrun desktop — visual flow runner (egui)")]
 struct Args {
+    /// Opsional — tanpa argumen, app mulai di layar "Buka flow".
     #[arg(short = 'f', long)]
-    flow: PathBuf,
+    flow: Option<PathBuf>,
     #[arg(short = 'c', long)]
-    config: PathBuf,
+    config: Option<PathBuf>,
     #[arg(short = 'e', long)]
-    env: PathBuf,
-    #[arg(long = "var", value_parser = parse_kv)]
-    vars: Vec<(String, String)>,
+    env: Option<PathBuf>,
     #[arg(long, default_value_t = 20)]
     timeout: u64,
 }
 
-fn parse_kv(s: &str) -> Result<(String, String), String> {
-    s.split_once('=')
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-        .ok_or_else(|| format!("--var harus kunci=nilai: {s}"))
+// ======================= recent files ==========================
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+struct RecentEntry {
+    flow: PathBuf,
+    cfg: PathBuf,
+    env: Option<PathBuf>,
 }
 
-// ---- protokol GUI <-> worker ----
+fn recent_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/flowrun/recent.json"))
+}
+
+fn load_recent() -> Vec<RecentEntry> {
+    recent_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn push_recent(entry: RecentEntry) {
+    let mut list = load_recent();
+    list.retain(|e| e != &entry);
+    list.insert(0, entry);
+    list.truncate(8);
+    if let Some(p) = recent_path() {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(p, serde_json::to_string_pretty(&list).unwrap_or_default());
+    }
+}
+
+// ==================== worker <-> GUI protocol ===================
+
 enum Cmd {
     Next,
     Skip,
     Auto,
     Reset,
+    /// Re-run node tertentu (mis. re-timbang utk skenario B1). Tidak memajukan
+    /// cursor kecuali node itu memang node saat ini dan lolos.
+    RunAt(usize),
     Quit,
 }
 
@@ -52,7 +88,7 @@ struct StepResult {
     ms: u128,
     msg: String,
     notes: Vec<String>,
-    body: String,
+    body: Option<serde_json::Value>,
     vars: Vec<(String, String)>,
 }
 
@@ -73,7 +109,6 @@ enum NodeState {
     Manual,
 }
 
-// ---- worker thread: pemilik Ctx + client, otoritatif atas cursor ----
 fn worker(mut ctx: Ctx, steps: Vec<FlowStep>, timeout: u64, rx: Receiver<Cmd>, tx: Sender<Evt>) {
     let initial = ctx.vars.clone();
     let client = reqwest::blocking::Client::builder()
@@ -82,8 +117,6 @@ fn worker(mut ctx: Ctx, steps: Vec<FlowStep>, timeout: u64, rx: Receiver<Cmd>, t
         .expect("build http client");
     let n = steps.len();
     let mut cursor = 0usize;
-
-    let snapshot = |ctx: &Ctx| ctx.vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>();
 
     while let Ok(cmd) = rx.recv() {
         match cmd {
@@ -95,16 +128,7 @@ fn worker(mut ctx: Ctx, steps: Vec<FlowStep>, timeout: u64, rx: Receiver<Cmd>, t
             }
             Cmd::Skip => {
                 if cursor < n {
-                    let _ = tx.send(Evt::Done(StepResult {
-                        idx: cursor,
-                        state: NodeState::Skip,
-                        status: None,
-                        ms: 0,
-                        msg: "dilewati manual".into(),
-                        notes: vec![],
-                        body: String::new(),
-                        vars: snapshot(&ctx),
-                    }));
+                    let _ = tx.send(Evt::Done(skip_result(cursor, &ctx)));
                     cursor += 1;
                 }
             }
@@ -113,11 +137,19 @@ fn worker(mut ctx: Ctx, steps: Vec<FlowStep>, timeout: u64, rx: Receiver<Cmd>, t
                     cursor += 1;
                 }
             }
+            Cmd::RunAt(i) => {
+                if i < n {
+                    let ok = exec(&steps, &mut ctx, &client, &tx, i);
+                    if ok && i == cursor {
+                        cursor += 1;
+                    }
+                }
+            }
             Cmd::Auto => {
                 while cursor < n {
                     if exec(&steps, &mut ctx, &client, &tx, cursor) {
                         cursor += 1;
-                        std::thread::sleep(Duration::from_millis(250)); // animasi kelihatan
+                        std::thread::sleep(Duration::from_millis(250));
                     } else {
                         break; // stop-on-fail
                     }
@@ -128,8 +160,23 @@ fn worker(mut ctx: Ctx, steps: Vec<FlowStep>, timeout: u64, rx: Receiver<Cmd>, t
     }
 }
 
-/// Jalankan langkah `i`. Return true bila boleh maju (pass/skip/manual),
-/// false bila gagal (biar bisa retry).
+fn snapshot_vars(ctx: &Ctx) -> Vec<(String, String)> {
+    ctx.vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
+fn skip_result(idx: usize, ctx: &Ctx) -> StepResult {
+    StepResult {
+        idx,
+        state: NodeState::Skip,
+        status: None,
+        ms: 0,
+        msg: "dilewati manual".into(),
+        notes: vec![],
+        body: None,
+        vars: snapshot_vars(ctx),
+    }
+}
+
 fn exec(
     steps: &[FlowStep],
     ctx: &mut Ctx,
@@ -139,7 +186,6 @@ fn exec(
 ) -> bool {
     let _ = tx.send(Evt::Started(i));
     let step = &steps[i];
-    let vars = |ctx: &Ctx| ctx.vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>();
 
     if step.cfg.manual || step.cfg.request.is_none() {
         let _ = tx.send(Evt::Done(StepResult {
@@ -149,8 +195,8 @@ fn exec(
             ms: 0,
             msg: "langkah manual/eksternal".into(),
             notes: vec![],
-            body: String::new(),
-            vars: vars(ctx),
+            body: None,
+            vars: snapshot_vars(ctx),
         }));
         return true;
     }
@@ -162,11 +208,6 @@ fn exec(
         Outcome::Manual => (NodeState::Manual, String::new(), true),
         Outcome::Failed(m) => (NodeState::Fail, m.clone(), false),
     };
-    let body = rep
-        .body
-        .as_ref()
-        .map(|b| serde_json::to_string_pretty(b).unwrap_or_default())
-        .unwrap_or_default();
     let _ = tx.send(Evt::Done(StepResult {
         idx: i,
         state,
@@ -174,32 +215,48 @@ fn exec(
         ms: rep.ms,
         msg,
         notes: rep.notes,
-        body,
-        vars: vars(ctx),
+        body: rep.body,
+        vars: snapshot_vars(ctx),
     }));
     cont
 }
 
-// ---- geometri node dari flowmaid scene ----
+// ========================= geometry ============================
+
 struct SceneNodeG {
-    step: usize,          // indeks langkah (mapping via graph node id)
-    center: egui::Pos2,   // koordinat scene (belum diskala)
+    step: usize,
+    center: egui::Pos2,
     size: egui::Vec2,
     label: String,
 }
 struct Geometry {
     nodes: Vec<SceneNodeG>,
-    edges: Vec<(Vec<egui::Pos2>, usize)>, // polyline scene-coords + step sumber (untuk warna)
+    edges: Vec<(Vec<egui::Pos2>, usize)>,
     w: f32,
     h: f32,
 }
 
-fn build_geometry(mermaid_src: &str, node_to_step: &HashMap<String, usize>) -> anyhow::Result<Geometry> {
-    let graph = match flowmaid::parser::parse_document(mermaid_src)
+#[derive(Clone, Copy, PartialEq)]
+enum LayoutDir {
+    LR,
+    TD,
+}
+
+fn build_geometry(
+    mermaid_src: &str,
+    node_to_step: &HashMap<String, usize>,
+    dir: LayoutDir,
+) -> anyhow::Result<Geometry> {
+    let mut graph = match flowmaid::parser::parse_document(mermaid_src)
         .map_err(|e| anyhow::anyhow!("parse: {e:?}"))?
     {
         flowmaid::model::Document::Flowchart(g) | flowmaid::model::Document::State(g) => g,
         _ => anyhow::bail!("bukan flowchart"),
+    };
+    // Override arah layout dari UI (LR = pita horizontal, TD = kolom vertikal).
+    graph.direction = match dir {
+        LayoutDir::LR => flowmaid::model::Direction::LR,
+        LayoutDir::TD => flowmaid::model::Direction::TD,
     };
     let sc = flowmaid::scene::scene(&graph);
     let nodes = sc
@@ -213,7 +270,6 @@ fn build_geometry(mermaid_src: &str, node_to_step: &HashMap<String, usize>) -> a
             label: n.label.clone(),
         })
         .collect();
-    // Warnai edge dari step sumber (graph.edges sejajar scene.edges).
     let edges = sc
         .edges
         .iter()
@@ -253,7 +309,8 @@ fn sample_bezier(b: &[(f64, f64); 4], n: usize) -> Vec<egui::Pos2> {
         .collect()
 }
 
-// ---- meta langkah untuk panel ----
+// ========================== session ============================
+
 #[derive(Clone)]
 struct StepMeta {
     node_id: String,
@@ -269,33 +326,115 @@ enum Role {
     Neutral,
 }
 
-fn rgb(hex: u32) -> egui::Color32 {
-    egui::Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+fn role_of(auth: Option<&str>) -> Role {
+    match auth {
+        Some("customer") => Role::Customer,
+        Some("owner") => Role::Owner,
+        _ => Role::Neutral,
+    }
 }
 
-struct App {
+struct LogLine {
+    t: f64,
+    text: String,
+    color: egui::Color32,
+}
+
+struct Session {
     meta: Vec<StepMeta>,
     geo: Geometry,
+    mermaid_src: String,
+    node_to_step: HashMap<String, usize>,
+    dir: LayoutDir,
     states: Vec<NodeState>,
     results: Vec<Option<StepResult>>,
     vars: Vec<(String, String)>,
+    log: Vec<LogLine>,
     selected: Option<usize>,
     cursor: usize,
     total: usize,
     auto_running: bool,
+    started: Instant,
     tx: Sender<Cmd>,
     rx: Receiver<Evt>,
-    // rect layar terakhir tiap node (untuk hit-test klik).
     hitboxes: Vec<(usize, egui::Rect)>,
-    // pan/zoom kanvas (ala n8n).
     zoom: f32,
     pan: egui::Vec2,
     fitted: bool,
-    follow: bool,               // view mengikuti node aktif
-    center_on: Option<usize>,   // permintaan center (diproses saat canvas tahu rect)
+    follow: bool,
+    center_on: Option<usize>,
 }
 
-impl App {
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = self.tx.send(Cmd::Quit);
+    }
+}
+
+impl Session {
+    fn start(flow_path: &Path, cfg_path: &Path, env: EnvConfig, timeout: u64) -> anyhow::Result<Session> {
+        let flow_cfg = config::load_flow_config(cfg_path)?;
+        for p in &flow_cfg.auth_profiles {
+            match env.tokens.get(p) {
+                Some(t) if !t.trim().is_empty() => {}
+                _ => anyhow::bail!("token profil '{p}' kosong — isi di panel koneksi"),
+            }
+        }
+        let ctx = Ctx::build(&flow_cfg, env, &[]);
+        let parsed = flow::load(flow_path, flow_cfg)?;
+        let node_to_step: HashMap<String, usize> =
+            parsed.steps.iter().enumerate().map(|(i, s)| (s.node_id.clone(), i)).collect();
+        let dir = LayoutDir::LR;
+        let geo = build_geometry(&parsed.mermaid_src, &node_to_step, dir)?;
+        let meta: Vec<StepMeta> = parsed
+            .steps
+            .iter()
+            .map(|s| StepMeta {
+                node_id: s.node_id.clone(),
+                title: s.title.clone(),
+                role: role_of(s.cfg.auth.as_deref()),
+                endpoint: s.cfg.request.clone().unwrap_or_else(|| "(manual)".into()),
+                note: s.cfg.note.clone(),
+            })
+            .collect();
+        let total = parsed.steps.len();
+
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<Cmd>();
+        let (evt_tx, evt_rx) = std::sync::mpsc::channel::<Evt>();
+        let steps = parsed.steps.clone();
+        std::thread::spawn(move || worker(ctx, steps, timeout, cmd_rx, evt_tx));
+
+        Ok(Session {
+            meta,
+            geo,
+            mermaid_src: parsed.mermaid_src,
+            node_to_step,
+            dir,
+            states: vec![NodeState::Idle; total],
+            results: vec![None; total],
+            vars: Vec::new(),
+            log: Vec::new(),
+            selected: None,
+            cursor: 0,
+            total,
+            auto_running: false,
+            started: Instant::now(),
+            tx: cmd_tx,
+            rx: evt_rx,
+            hitboxes: Vec::new(),
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+            fitted: false,
+            follow: true,
+            center_on: None,
+        })
+    }
+
+    fn logln(&mut self, text: String, color: egui::Color32) {
+        let t = self.started.elapsed().as_secs_f64();
+        self.log.push(LogLine { t, text, color });
+    }
+
     fn drain_events(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
@@ -305,6 +444,8 @@ impl App {
                     if self.follow {
                         self.center_on = Some(i);
                     }
+                    let m = &self.meta[i];
+                    self.logln(format!("→ {} {}  {}", m.node_id, m.title, m.endpoint), rgb(0x9ca3af));
                 }
                 Evt::Done(r) => {
                     let idx = r.idx;
@@ -314,9 +455,25 @@ impl App {
                     if r.state != NodeState::Fail && idx + 1 > self.cursor {
                         self.cursor = idx + 1;
                     }
+                    let (sym, col) = match r.state {
+                        NodeState::Ok => ("✅", rgb(0x22c55e)),
+                        NodeState::Fail => ("❌", rgb(0xef4444)),
+                        NodeState::Skip => ("⏭", rgb(0x94a3b8)),
+                        NodeState::Manual => ("✋", rgb(0xa78bfa)),
+                        _ => ("·", rgb(0x9ca3af)),
+                    };
+                    let http = r.status.map(|c| format!("HTTP {c} · {} ms", r.ms)).unwrap_or_default();
+                    let mut line = format!("{sym} {} {}  {}", self.meta[idx].node_id, http, r.msg);
+                    for n in &r.notes {
+                        line.push_str(&format!("\n      {n}"));
+                    }
+                    self.logln(line, col);
                     self.results[idx] = Some(r);
                 }
-                Evt::AutoDone => self.auto_running = false,
+                Evt::AutoDone => {
+                    self.auto_running = false;
+                    self.logln("auto selesai".into(), rgb(0x9ca3af));
+                }
                 Evt::Reset => {
                     self.states.iter_mut().for_each(|s| *s = NodeState::Idle);
                     self.results.iter_mut().for_each(|r| *r = None);
@@ -324,12 +481,127 @@ impl App {
                     self.selected = None;
                     self.vars.clear();
                     self.auto_running = false;
+                    self.logln("reset — siap dari awal".into(), rgb(0x9ca3af));
                 }
             }
         }
     }
 
-    fn state_color(&self, st: NodeState, role: Role) -> egui::Color32 {
+    fn toggle_dir(&mut self) {
+        self.dir = if self.dir == LayoutDir::LR { LayoutDir::TD } else { LayoutDir::LR };
+        if let Ok(g) = build_geometry(&self.mermaid_src, &self.node_to_step, self.dir) {
+            self.geo = g;
+            self.fitted = false;
+        }
+    }
+}
+
+// ====================== picker (layar buka) ====================
+
+#[derive(Default)]
+struct Picker {
+    flow: Option<PathBuf>,
+    cfg: Option<PathBuf>,
+    env: Option<PathBuf>,
+    base_url: String,
+    tokens: Vec<(String, String)>,
+    vars: Vec<(String, String)>,
+    show_tokens: bool,
+    error: Option<String>,
+    recent: Vec<RecentEntry>,
+    new_var_k: String,
+    new_var_v: String,
+}
+
+impl Picker {
+    fn new() -> Self {
+        Picker { recent: load_recent(), ..Default::default() }
+    }
+
+    /// Auto-saran cfg/env dari folder flow + muat draft koneksi.
+    fn on_flow_picked(&mut self, p: PathBuf) {
+        let dir = p.parent().map(Path::to_path_buf).unwrap_or_default();
+        if self.cfg.is_none() {
+            let c = dir.join("flow.yaml");
+            if c.exists() {
+                self.cfg = Some(c);
+            }
+        }
+        if self.env.is_none() {
+            for cand in ["dev.yaml", "env.yaml", "env.sample.yaml"] {
+                let e = dir.join(cand);
+                if e.exists() {
+                    self.env = Some(e);
+                    break;
+                }
+            }
+        }
+        self.flow = Some(p);
+        self.reload_draft();
+    }
+
+    fn reload_draft(&mut self) {
+        self.error = None;
+        // Profil auth dari flow.yaml (urutan token mengikuti ini).
+        let profiles: Vec<String> = self
+            .cfg
+            .as_ref()
+            .and_then(|c| config::load_flow_config(c).ok())
+            .map(|fc| fc.auth_profiles)
+            .unwrap_or_default();
+        let envc = self
+            .env
+            .as_ref()
+            .and_then(|e| config::load_env_config(e).ok())
+            .unwrap_or_default();
+        self.base_url = envc.base_url.clone();
+        let mut tokens: Vec<(String, String)> = Vec::new();
+        for p in &profiles {
+            tokens.push((p.clone(), envc.tokens.get(p).cloned().unwrap_or_default()));
+        }
+        for (k, v) in &envc.tokens {
+            if !profiles.contains(k) {
+                tokens.push((k.clone(), v.clone()));
+            }
+        }
+        self.tokens = tokens;
+        self.vars = envc.vars.iter().map(|(k, v)| (k.clone(), config::yaml_to_var_string(v))).collect();
+    }
+
+    fn to_env_config(&self) -> EnvConfig {
+        let mut env = EnvConfig { base_url: self.base_url.trim().to_string(), ..Default::default() };
+        for (k, v) in &self.tokens {
+            env.tokens.insert(k.clone(), v.trim().to_string());
+        }
+        for (k, v) in &self.vars {
+            env.vars.insert(k.clone(), serde_yaml::Value::String(v.clone()));
+        }
+        env
+    }
+}
+
+// ============================ app ==============================
+
+struct App {
+    picker: Picker,
+    session: Option<Session>,
+    timeout: u64,
+}
+
+fn rgb(hex: u32) -> egui::Color32 {
+    egui::Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+fn role_color(r: Role) -> egui::Color32 {
+    match r {
+        Role::Customer => rgb(0x3b82f6),
+        Role::Owner => rgb(0xf59e0b),
+        Role::Neutral => rgb(0x64748b),
+    }
+}
+
+impl App {
+    fn state_color(st: NodeState, role: Role) -> egui::Color32 {
         match st {
             NodeState::Current => rgb(0xeab308),
             NodeState::Ok => rgb(0x22c55e),
@@ -343,68 +615,236 @@ impl App {
             },
         }
     }
+
+    fn try_start(&mut self) {
+        let (Some(f), Some(c)) = (self.picker.flow.clone(), self.picker.cfg.clone()) else {
+            self.picker.error = Some("pilih flow.mmd dan flow.yaml dulu".into());
+            return;
+        };
+        match Session::start(&f, &c, self.picker.to_env_config(), self.timeout) {
+            Ok(s) => {
+                push_recent(RecentEntry { flow: f, cfg: c, env: self.picker.env.clone() });
+                self.picker.recent = load_recent();
+                self.session = Some(s);
+            }
+            Err(e) => self.picker.error = Some(format!("{e:#}")),
+        }
+    }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
-        self.drain_events();
+        match &mut self.session {
+            Some(_) => self.ui_run(ctx),
+            None => self.ui_picker(ctx),
+        }
+    }
+}
+
+// ------------------------- layar picker ------------------------
+
+impl App {
+    fn ui_picker(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.add_space(12.0);
+                ui.heading("⚡ flowrun — buka flow");
+                ui.add_space(8.0);
+
+                let pick_row = |ui: &mut egui::Ui, label: &str, val: &Option<PathBuf>, exts: &[&str]| -> Option<PathBuf> {
+                    let mut out = None;
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(label).strong());
+                        if ui.button("Pilih…").clicked() {
+                            let mut dlg = rfd::FileDialog::new();
+                            if !exts.is_empty() {
+                                dlg = dlg.add_filter(label, exts);
+                            }
+                            if let Some(p) = dlg.pick_file() {
+                                out = Some(p);
+                            }
+                        }
+                        match val {
+                            Some(p) => ui.monospace(p.display().to_string()),
+                            None => ui.colored_label(rgb(0x9ca3af), "(belum dipilih)"),
+                        };
+                    });
+                    out
+                };
+
+                if let Some(p) = pick_row(ui, "flow.mmd", &self.picker.flow, &["mmd"]) {
+                    self.picker.on_flow_picked(p);
+                }
+                if let Some(p) = pick_row(ui, "flow.yaml", &self.picker.cfg, &["yaml", "yml"]) {
+                    self.picker.cfg = Some(p);
+                    self.picker.reload_draft();
+                }
+                if let Some(p) = pick_row(ui, "env (opsional)", &self.picker.env, &["yaml", "yml"]) {
+                    self.picker.env = Some(p);
+                    self.picker.reload_draft();
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.label(egui::RichText::new("Koneksi (bisa diedit — hanya untuk sesi ini, tidak ditulis ke file)").strong());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("base_url");
+                    ui.add(egui::TextEdit::singleline(&mut self.picker.base_url).desired_width(360.0).hint_text("https://host-dev"));
+                });
+                ui.checkbox(&mut self.picker.show_tokens, "tampilkan token");
+                let show = self.picker.show_tokens;
+                for (name, val) in &mut self.picker.tokens {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("token {name}"));
+                        ui.add(egui::TextEdit::singleline(val).password(!show).desired_width(360.0).hint_text("eyJ…"));
+                    });
+                }
+                ui.add_space(4.0);
+                ui.collapsing("vars", |ui| {
+                    let mut del: Option<usize> = None;
+                    for (i, (k, v)) in self.picker.vars.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.monospace(k.as_str());
+                            ui.add(egui::TextEdit::singleline(v).desired_width(280.0));
+                            if ui.small_button("🗑").clicked() {
+                                del = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = del {
+                        self.picker.vars.remove(i);
+                    }
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.picker.new_var_k).desired_width(120.0).hint_text("kunci"));
+                        ui.add(egui::TextEdit::singleline(&mut self.picker.new_var_v).desired_width(200.0).hint_text("nilai"));
+                        if ui.button("+ tambah").clicked() && !self.picker.new_var_k.trim().is_empty() {
+                            self.picker.vars.push((self.picker.new_var_k.trim().to_string(), self.picker.new_var_v.clone()));
+                            self.picker.new_var_k.clear();
+                            self.picker.new_var_v.clear();
+                        }
+                    });
+                });
+
+                ui.add_space(10.0);
+                if let Some(err) = &self.picker.error {
+                    ui.colored_label(rgb(0xef4444), err);
+                }
+                if ui.add(egui::Button::new(egui::RichText::new("▶ Mulai").strong()).min_size(egui::vec2(120.0, 32.0))).clicked() {
+                    self.try_start();
+                }
+
+                if !self.picker.recent.is_empty() {
+                    ui.add_space(14.0);
+                    ui.separator();
+                    ui.label(egui::RichText::new("Terakhir dibuka").strong());
+                    let recents = self.picker.recent.clone();
+                    for r in recents {
+                        let name = r.flow.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                        let dir = r.flow.parent().map(|p| p.display().to_string()).unwrap_or_default();
+                        if ui.button(format!("📂 {name} — {dir}")).clicked() {
+                            self.picker.flow = Some(r.flow.clone());
+                            self.picker.cfg = Some(r.cfg.clone());
+                            self.picker.env = r.env.clone();
+                            self.picker.reload_draft();
+                        }
+                    }
+                }
+            });
+        });
+    }
+}
+
+// -------------------------- layar run --------------------------
+
+impl App {
+    fn ui_run(&mut self, ctx: &egui::Context) {
+        let mut back_to_picker = false;
+        let sess = self.session.as_mut().expect("dicek pemanggil");
+        sess.drain_events();
 
         // ---- toolbar ----
         egui::TopBottomPanel::top("bar").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let can_step = self.cursor < self.total && !self.auto_running;
+                if ui.button("📂 Buka").clicked() {
+                    back_to_picker = true;
+                }
+                ui.separator();
+                let can_step = sess.cursor < sess.total && !sess.auto_running;
                 if ui.add_enabled(can_step, egui::Button::new("▶ Next")).clicked() {
-                    let _ = self.tx.send(Cmd::Next);
+                    let _ = sess.tx.send(Cmd::Next);
                 }
                 if ui.add_enabled(can_step, egui::Button::new("⏭ Skip")).clicked() {
-                    let _ = self.tx.send(Cmd::Skip);
+                    let _ = sess.tx.send(Cmd::Skip);
                 }
-                if ui
-                    .add_enabled(self.cursor < self.total && !self.auto_running, egui::Button::new("⏩ Auto"))
-                    .clicked()
-                {
-                    self.auto_running = true;
-                    let _ = self.tx.send(Cmd::Auto);
+                if ui.add_enabled(can_step, egui::Button::new("⏩ Auto")).clicked() {
+                    sess.auto_running = true;
+                    let _ = sess.tx.send(Cmd::Auto);
                 }
                 if ui.button("↺ Reset").clicked() {
-                    let _ = self.tx.send(Cmd::Reset);
+                    let _ = sess.tx.send(Cmd::Reset);
+                }
+                ui.separator();
+                if ui.button(if sess.dir == LayoutDir::LR { "⇊ TD" } else { "⇉ LR" }).on_hover_text("ganti arah layout").clicked() {
+                    sess.toggle_dir();
                 }
                 if ui.button("⤢ Fit").clicked() {
-                    self.fitted = false; // re-fit frame berikutnya
+                    sess.fitted = false;
                 }
-                ui.toggle_value(&mut self.follow, "👁 Follow");
+                ui.toggle_value(&mut sess.follow, "👁 Follow");
                 ui.separator();
-                let done = self.states.iter().filter(|s| matches!(s, NodeState::Ok)).count();
-                let fail = self.states.iter().filter(|s| matches!(s, NodeState::Fail)).count();
-                ui.label(format!("progress {}/{}   ✅ {done}  ❌ {fail}", self.cursor, self.total));
-                legend(ui, rgb(0x2c4a7a), "Customer");
-                legend(ui, rgb(0x7a5320), "Owner");
-                legend(ui, rgb(0x22c55e), "ok");
-                legend(ui, rgb(0xef4444), "fail");
-                ui.separator();
+                let done = sess.states.iter().filter(|s| matches!(s, NodeState::Ok)).count();
+                let fail = sess.states.iter().filter(|s| matches!(s, NodeState::Fail)).count();
+                ui.label(format!("progress {}/{}   ✅ {done}  ❌ {fail}", sess.cursor, sess.total));
+                legend(ui, rgb(0x3b82f6), "Customer");
+                legend(ui, rgb(0xf59e0b), "Owner");
                 ui.small("scroll = zoom · drag = geser");
             });
             ui.add_space(4.0);
         });
 
-        // ---- inspector (kanan) ----
-        egui::SidePanel::right("inspector").default_width(360.0).show(ctx, |ui| {
-            if let Some(i) = self.selected {
-                let m = &self.meta[i];
-                let role = match m.role {
-                    Role::Customer => "Customer",
-                    Role::Owner => "Owner",
-                    Role::Neutral => "-",
-                };
-                ui.heading(&m.title);
-                ui.label(format!("{}  ·  {}", m.node_id, role));
+        // ---- log bawah ----
+        egui::TopBottomPanel::bottom("log").resizable(true).default_height(130.0).show(ctx, |ui| {
+            egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
+                for line in &sess.log {
+                    ui.horizontal_top(|ui| {
+                        ui.monospace(egui::RichText::new(format!("T+{:6.1}s", line.t)).color(rgb(0x6b7280)).size(10.5));
+                        ui.label(egui::RichText::new(&line.text).color(line.color).monospace().size(11.0));
+                    });
+                }
+            });
+        });
+
+        // ---- inspector kanan ----
+        egui::SidePanel::right("inspector").resizable(true).default_width(380.0).show(ctx, |ui| {
+            if let Some(i) = sess.selected {
+                let m = sess.meta[i].clone();
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let rc = role_color(m.role);
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter().circle_filled(r.center(), 5.0, rc);
+                    ui.heading(&m.title);
+                });
+                ui.label(format!(
+                    "{} · {}",
+                    m.node_id,
+                    match m.role {
+                        Role::Customer => "Customer",
+                        Role::Owner => "Owner",
+                        Role::Neutral => "-",
+                    }
+                ));
                 ui.monospace(&m.endpoint);
                 if let Some(n) = &m.note {
                     ui.colored_label(rgb(0x9ca3af), format!("📝 {n}"));
                 }
+                if ui.button("⟳ Hit node ini").on_hover_text("jalankan ulang node ini sekarang (tanpa memajukan urutan)").clicked() {
+                    let _ = sess.tx.send(Cmd::RunAt(i));
+                }
                 ui.separator();
-                if let Some(r) = &self.results[i] {
+                if let Some(r) = &sess.results[i] {
                     let col = match r.status {
                         Some(c) if c >= 500 => rgb(0xef4444),
                         Some(c) if c >= 400 => rgb(0xf59e0b),
@@ -415,6 +855,14 @@ impl eframe::App for App {
                         ui.label("HTTP");
                         ui.colored_label(col, r.status.map(|c| c.to_string()).unwrap_or("-".into()));
                         ui.label(format!("· {} ms", r.ms));
+                        if r.body.is_some() && ui.small_button("📋 copy").clicked() {
+                            let pretty = r
+                                .body
+                                .as_ref()
+                                .map(|b| serde_json::to_string_pretty(b).unwrap_or_default())
+                                .unwrap_or_default();
+                            ui.output_mut(|o| o.copied_text = pretty);
+                        }
                     });
                     if !r.msg.is_empty() {
                         ui.colored_label(if r.state == NodeState::Fail { rgb(0xef4444) } else { rgb(0x9ca3af) }, &r.msg);
@@ -422,118 +870,138 @@ impl eframe::App for App {
                     for n in &r.notes {
                         ui.small(n);
                     }
-                    if !r.body.is_empty() {
+                    if let Some(body) = &r.body {
                         ui.separator();
-                        ui.label("response:");
-                        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                            ui.monospace(&r.body);
+                        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                            json_tree(ui, &format!("resp{i}"), "response", body);
                         });
                     }
                 } else {
                     ui.colored_label(rgb(0x9ca3af), "belum dijalankan");
                 }
             } else {
+                ui.add_space(6.0);
                 ui.colored_label(rgb(0x9ca3af), "klik node untuk inspeksi");
             }
             ui.separator();
             ui.collapsing("context vars", |ui| {
-                for (k, v) in &self.vars {
+                for (k, v) in &sess.vars {
                     ui.small(format!("{k} = {v}"));
                 }
             });
         });
 
-        // ---- canvas (pan + zoom ala n8n) ----
+        // ---- canvas ----
         egui::CentralPanel::default().show(ctx, |ui| {
             let (resp, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
             let rect = resp.rect;
             painter.rect_filled(rect, egui::Rounding::ZERO, rgb(0x14161b));
 
-            // Fit-to-view sekali di awal (lihat seluruh flow), lalu user zoom/pan.
             let margin = 40.0;
-            if !self.fitted && self.geo.w > 1.0 {
-                let sx = (rect.width() - 2.0 * margin) / self.geo.w;
-                let sy = (rect.height() - 2.0 * margin) / self.geo.h;
-                // Floor 0.8 supaya label terbaca dari awal (ribbon lebar → pan/follow).
-                self.zoom = sx.min(sy).clamp(0.8, 2.0);
-                self.pan = egui::vec2(
-                    (rect.width() - self.geo.w * self.zoom) / 2.0,
-                    (rect.height() - self.geo.h * self.zoom) / 2.0,
+            if !sess.fitted && sess.geo.w > 1.0 {
+                let sx = (rect.width() - 2.0 * margin) / sess.geo.w;
+                let sy = (rect.height() - 2.0 * margin) / sess.geo.h;
+                sess.zoom = sx.min(sy).clamp(0.8, 2.0);
+                sess.pan = egui::vec2(
+                    (rect.width() - sess.geo.w * sess.zoom) / 2.0,
+                    (rect.height() - sess.geo.h * sess.zoom) / 2.0,
                 );
-                self.center_on = Some(0);
-                self.fitted = true;
+                sess.center_on = Some(sess.selected.unwrap_or(0));
+                sess.fitted = true;
             }
-            // Auto-follow: center-kan node aktif (setelah zoom diketahui).
-            if let Some(i) = self.center_on.take() {
-                if let Some(sn) = self.geo.nodes.iter().find(|n| n.step == i) {
+            if let Some(i) = sess.center_on.take() {
+                if let Some(sn) = sess.geo.nodes.iter().find(|n| n.step == i) {
                     let want = rect.center() - rect.min;
-                    self.pan = want - egui::vec2(sn.center.x * self.zoom, sn.center.y * self.zoom);
+                    sess.pan = want - egui::vec2(sn.center.x * sess.zoom, sn.center.y * sess.zoom);
                 }
             }
-
-            // Zoom scroll (anchored di kursor).
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 && resp.hovered() {
                 if let Some(p) = resp.hover_pos() {
-                    let old = self.zoom;
-                    self.zoom = (self.zoom * (1.0 + scroll * 0.0015)).clamp(0.15, 6.0);
-                    let s = (p - rect.min - self.pan) / old; // titik scene di bawah kursor
-                    self.pan = (p - rect.min) - s * self.zoom;
+                    let old = sess.zoom;
+                    sess.zoom = (sess.zoom * (1.0 + scroll * 0.0015)).clamp(0.15, 6.0);
+                    let s = (p - rect.min - sess.pan) / old;
+                    sess.pan = (p - rect.min) - s * sess.zoom;
                 }
             }
-            // Pan drag → user ambil alih (matikan follow).
             if resp.dragged() {
-                self.pan += resp.drag_delta();
-                self.follow = false;
+                sess.pan += resp.drag_delta();
+                sess.follow = false;
             }
-            let zoom = self.zoom;
-            let base = rect.min + self.pan;
+            let zoom = sess.zoom;
+            let base = rect.min + sess.pan;
             let tf = |p: egui::Pos2| base + egui::vec2(p.x * zoom, p.y * zoom);
+            let time = ui.input(|i| i.time);
 
-            // edges
-            for (pts, src) in &self.geo.edges {
-                let done = *src != usize::MAX && matches!(self.states.get(*src), Some(NodeState::Ok));
+            // edges + panah
+            for (pts, src) in &sess.geo.edges {
+                let done = *src != usize::MAX && matches!(sess.states.get(*src), Some(NodeState::Ok));
                 let col = if done { rgb(0x22c55e) } else { rgb(0x4b5563) };
                 let poly: Vec<egui::Pos2> = pts.iter().map(|&p| tf(p)).collect();
                 if poly.len() >= 2 {
-                    painter.add(egui::Shape::line(poly, egui::Stroke::new(2.0, col)));
+                    painter.add(egui::Shape::line(poly.clone(), egui::Stroke::new(2.0, col)));
+                    // Panah di ujung: arah dari 2 titik terakhir.
+                    let end = poly[poly.len() - 1];
+                    let prev = poly[poly.len() - 2];
+                    let d = (end - prev).normalized();
+                    if d.length() > 0.1 {
+                        let perp = egui::vec2(-d.y, d.x);
+                        let sz = (7.0 * zoom).clamp(5.0, 14.0);
+                        painter.add(egui::Shape::convex_polygon(
+                            vec![end, end - d * sz + perp * sz * 0.55, end - d * sz - perp * sz * 0.55],
+                            col,
+                            egui::Stroke::NONE,
+                        ));
+                    }
                 }
             }
 
             // nodes
-            self.hitboxes.clear();
-            for sn in &self.geo.nodes {
+            sess.hitboxes.clear();
+            for sn in &sess.geo.nodes {
                 let c = tf(sn.center);
                 let size = sn.size * zoom;
                 let r = egui::Rect::from_center_size(c, size);
-                self.hitboxes.push((sn.step, r));
-                let st = self.states[sn.step];
-                let role = self.meta[sn.step].role;
-                let fill = self.state_color(st, role);
-                let sel = self.selected == Some(sn.step);
+                sess.hitboxes.push((sn.step, r));
+                let st = sess.states[sn.step];
+                let role = sess.meta[sn.step].role;
+                let fill = Self::state_color(st, role);
+                let sel = sess.selected == Some(sn.step);
                 painter.rect_filled(r, egui::Rounding::same(6.0), fill);
-                let border = if sel { rgb(0xffffff) } else { rgb(0x14161b) };
-                painter.rect_stroke(r, egui::Rounding::same(6.0), egui::Stroke::new(if sel { 2.5 } else { 1.0 }, border));
-                let txt_col = if matches!(st, NodeState::Idle | NodeState::Current) { rgb(0xffffff) } else { rgb(0x0b1220) };
-                // Sembunyikan label saat terlalu kecil (zoom jauh) agar tak jadi bercak.
+
+                // Ring: pulse kuning utk node aktif; putih utk seleksi.
+                if st == NodeState::Current {
+                    let a = (0.45 + 0.4 * ((time * 5.0).sin() * 0.5 + 0.5)) as f32;
+                    let ring = egui::Color32::from_rgba_unmultiplied(0xea, 0xb3, 0x08, (a * 255.0) as u8);
+                    painter.rect_stroke(r.expand(3.0), egui::Rounding::same(8.0), egui::Stroke::new(3.0, ring));
+                } else if sel {
+                    painter.rect_stroke(r.expand(2.0), egui::Rounding::same(7.0), egui::Stroke::new(2.0, rgb(0xffffff)));
+                }
+                painter.rect_stroke(r, egui::Rounding::same(6.0), egui::Stroke::new(1.0, rgb(0x14161b)));
+
+                // Badge role di pojok kiri-atas (role tetap terlihat saat status menimpa warna).
+                if size.x > 30.0 {
+                    painter.circle_filled(r.min + egui::vec2(7.0, 7.0), (3.5 * zoom).clamp(2.5, 5.0), role_color(role));
+                }
+
+                // Label wrap 2 baris (tak lagi terpotong "…" agresif).
                 if size.x > 34.0 {
-                    let chars = (size.x / (6.0 * zoom).max(3.0)) as usize;
-                    painter.text(
-                        c,
-                        egui::Align2::CENTER_CENTER,
-                        ellipsize(&sn.label, chars.clamp(4, 40)),
-                        egui::FontId::proportional((11.0 * zoom).clamp(9.0, 20.0)),
-                        txt_col,
-                    );
+                    let font = egui::FontId::proportional((11.0 * zoom).clamp(9.0, 20.0));
+                    let txt_col = if matches!(st, NodeState::Idle | NodeState::Current) { rgb(0xffffff) } else { rgb(0x0b1220) };
+                    let mut job = egui::text::LayoutJob::simple(sn.label.clone(), font, txt_col, size.x - 12.0);
+                    job.wrap.max_rows = 2;
+                    job.wrap.overflow_character = Some('…');
+                    job.halign = egui::Align::Center;
+                    let galley = painter.layout_job(job);
+                    painter.galley(egui::pos2(c.x, c.y - galley.size().y / 2.0), galley, txt_col);
                 }
             }
 
-            // klik → pilih node
             if resp.clicked() {
                 if let Some(pos) = resp.interact_pointer_pos() {
-                    for (step, hb) in self.hitboxes.iter().rev() {
+                    for (step, hb) in sess.hitboxes.iter().rev() {
                         if hb.contains(pos) {
-                            self.selected = Some(*step);
+                            sess.selected = Some(*step);
                             break;
                         }
                     }
@@ -541,8 +1009,11 @@ impl eframe::App for App {
             }
         });
 
-        // poll worker (animasi auto + hasil masuk mulus)
         ctx.request_repaint_after(Duration::from_millis(60));
+
+        if back_to_picker {
+            self.session = None; // Drop → worker Quit
+        }
     }
 }
 
@@ -552,83 +1023,53 @@ fn legend(ui: &mut egui::Ui, c: egui::Color32, label: &str) {
     ui.small(label);
 }
 
-fn ellipsize(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", s.chars().take(max - 1).collect::<String>())
+/// JSON viewer collapsible sederhana (rekursif).
+fn json_tree(ui: &mut egui::Ui, id: &str, key: &str, v: &serde_json::Value) {
+    match v {
+        serde_json::Value::Object(o) if !o.is_empty() => {
+            egui::CollapsingHeader::new(egui::RichText::new(format!("{key} {{{}}}", o.len())).monospace())
+                .id_salt(format!("{id}/{key}"))
+                .default_open(key == "response" || key == "data")
+                .show(ui, |ui| {
+                    for (k, val) in o {
+                        json_tree(ui, &format!("{id}/{key}"), k, val);
+                    }
+                });
+        }
+        serde_json::Value::Array(a) if !a.is_empty() => {
+            egui::CollapsingHeader::new(egui::RichText::new(format!("{key} [{}]", a.len())).monospace())
+                .id_salt(format!("{id}/{key}"))
+                .show(ui, |ui| {
+                    for (i, val) in a.iter().enumerate() {
+                        json_tree(ui, &format!("{id}/{key}"), &i.to_string(), val);
+                    }
+                });
+        }
+        _ => {
+            ui.monospace(format!("{key}: {v}"));
+        }
     }
 }
 
-fn role_of(auth: Option<&str>) -> Role {
-    match auth {
-        Some("customer") => Role::Customer,
-        Some("owner") => Role::Owner,
-        _ => Role::Neutral,
-    }
-}
+// ============================ main =============================
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let flow_cfg = config::load_flow_config(&args.config)?;
-    let env_cfg = config::load_env_config(&args.env)?;
-    for p in &flow_cfg.auth_profiles {
-        match env_cfg.tokens.get(p) {
-            Some(t) if !t.trim().is_empty() => {}
-            _ => anyhow::bail!("token profil '{p}' kosong/tak ada di env {}", args.env.display()),
-        }
+    let mut app = App { picker: Picker::new(), session: None, timeout: args.timeout };
+
+    // CLI args tetap didukung: langsung mulai bila lengkap.
+    if let (Some(f), Some(c)) = (args.flow.clone(), args.config.clone()) {
+        app.picker.flow = Some(f);
+        app.picker.cfg = Some(c);
+        app.picker.env = args.env.clone();
+        app.picker.reload_draft();
+        app.try_start();
     }
-    let ctx = Ctx::build(&flow_cfg, env_cfg, &args.vars);
-    let parsed = flow::load(&args.flow, flow_cfg)?;
-
-    let node_to_step: HashMap<String, usize> =
-        parsed.steps.iter().enumerate().map(|(i, s)| (s.node_id.clone(), i)).collect();
-    let geo = build_geometry(&parsed.mermaid_src, &node_to_step)?;
-    let meta: Vec<StepMeta> = parsed
-        .steps
-        .iter()
-        .map(|s| StepMeta {
-            node_id: s.node_id.clone(),
-            title: s.title.clone(),
-            role: role_of(s.cfg.auth.as_deref()),
-            endpoint: s.cfg.request.clone().unwrap_or_else(|| "(manual)".into()),
-            note: s.cfg.note.clone(),
-        })
-        .collect();
-    let total = parsed.steps.len();
-
-    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<Cmd>();
-    let (evt_tx, evt_rx) = std::sync::mpsc::channel::<Evt>();
-    let steps = parsed.steps.clone();
-    let timeout = args.timeout;
-    std::thread::spawn(move || worker(ctx, steps, timeout, cmd_rx, evt_tx));
-
-    let quit_tx = cmd_tx.clone();
-    let app = App {
-        meta,
-        geo,
-        states: vec![NodeState::Idle; total],
-        results: vec![None; total],
-        vars: Vec::new(),
-        selected: None,
-        cursor: 0,
-        total,
-        auto_running: false,
-        tx: cmd_tx,
-        rx: evt_rx,
-        hitboxes: Vec::new(),
-        zoom: 1.0,
-        pan: egui::Vec2::ZERO,
-        fitted: false,
-        follow: true,
-        center_on: None,
-    };
 
     let native = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1180.0, 640.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1220.0, 700.0]),
         ..Default::default()
     };
-    let res = eframe::run_native("flowrun", native, Box::new(|_cc| Ok(Box::new(app))));
-    let _ = quit_tx.send(Cmd::Quit);
-    res.map_err(|e| anyhow::anyhow!("eframe: {e}"))
+    eframe::run_native("flowrun", native, Box::new(|_cc| Ok(Box::new(app))))
+        .map_err(|e| anyhow::anyhow!("eframe: {e}"))
 }
