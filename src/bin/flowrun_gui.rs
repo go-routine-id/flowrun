@@ -238,6 +238,11 @@ struct Geometry {
 
 #[derive(Clone, Copy, PartialEq)]
 enum LayoutDir {
+    /// Serpentine: rantai linear dilipat beberapa baris zig-zag agar seluruh
+    /// flow muat layar tanpa scroll (layered layout — flowmaid/mermaid — akan
+    /// merender rantai linear sebagai satu pita panjang; ini penyempurnaan
+    /// presentasi milik flowrun, flowmaid tetap dipakai utk parse + ukuran node).
+    Snake,
     LR,
     TD,
 }
@@ -253,12 +258,16 @@ fn build_geometry(
         flowmaid::model::Document::Flowchart(g) | flowmaid::model::Document::State(g) => g,
         _ => anyhow::bail!("bukan flowchart"),
     };
-    // Override arah layout dari UI (LR = pita horizontal, TD = kolom vertikal).
     graph.direction = match dir {
-        LayoutDir::LR => flowmaid::model::Direction::LR,
+        LayoutDir::LR | LayoutDir::Snake => flowmaid::model::Direction::LR,
         LayoutDir::TD => flowmaid::model::Direction::TD,
     };
     let sc = flowmaid::scene::scene(&graph);
+
+    if dir == LayoutDir::Snake {
+        return Ok(snake_layout(&graph, &sc, node_to_step));
+    }
+
     let nodes = sc
         .nodes
         .iter()
@@ -289,6 +298,72 @@ fn build_geometry(
         })
         .collect();
     Ok(Geometry { nodes, edges, w: sc.width as f32, h: sc.height as f32 })
+}
+
+/// Layout ular untuk rantai linear: grid serpentine (baris genap →, baris
+/// ganjil ←) + konektor siku antar-baris. Ukuran node diambil dari flowmaid
+/// scene (intrinsic size), posisi dihitung di sini.
+fn snake_layout(
+    graph: &flowmaid::model::Graph,
+    sc: &flowmaid::scene::Scene,
+    node_to_step: &HashMap<String, usize>,
+) -> Geometry {
+    let n = sc.nodes.len();
+    // Urutan eksekusi: step index → indeks scene-node.
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| node_to_step.get(&graph.nodes[i].id).copied().unwrap_or(usize::MAX));
+
+    // Kolom: mendekati aspek layar lebar; 14 node → 5 kolom (3 baris).
+    let cols = ((n as f32 * 1.6).sqrt().ceil() as usize).max(2);
+    let max_w = sc.nodes.iter().map(|s| s.w).fold(60.0, f64::max) as f32;
+    let max_h = sc.nodes.iter().map(|s| s.h).fold(28.0, f64::max) as f32;
+    let (gap_x, gap_y) = (56.0f32, 64.0f32);
+    let (cell_w, cell_h) = (max_w + gap_x, max_h + gap_y);
+
+    let mut nodes: Vec<SceneNodeG> = Vec::with_capacity(n);
+    let mut centers: Vec<egui::Pos2> = Vec::with_capacity(n); // urut step
+    for (k, &si) in order.iter().enumerate() {
+        let row = k / cols;
+        let col_in = k % cols;
+        // Serpentine: baris ganjil dibalik arah kolomnya.
+        let col = if row % 2 == 0 { col_in } else { cols - 1 - col_in };
+        let c = egui::pos2(
+            col as f32 * cell_w + cell_w / 2.0,
+            row as f32 * cell_h + cell_h / 2.0,
+        );
+        centers.push(c);
+        let s = &sc.nodes[si];
+        nodes.push(SceneNodeG {
+            step: *node_to_step.get(&graph.nodes[si].id).unwrap_or(&0),
+            center: c,
+            size: egui::vec2(s.w as f32, s.h as f32),
+            label: s.label.clone(),
+        });
+    }
+
+    // Konektor: sesama baris = garis horizontal antar tepi box; pindah baris
+    // (posisi kolom sama) = garis vertikal turun.
+    let mut edges: Vec<(Vec<egui::Pos2>, usize)> = Vec::new();
+    for k in 0..n.saturating_sub(1) {
+        let (a, b) = (centers[k], centers[k + 1]);
+        let (sa, sb) = (nodes[k].size, nodes[k + 1].size);
+        let pts = if (a.y - b.y).abs() < 1.0 {
+            let dirx = (b.x - a.x).signum();
+            vec![
+                egui::pos2(a.x + dirx * sa.x / 2.0, a.y),
+                egui::pos2(b.x - dirx * sb.x / 2.0, b.y),
+            ]
+        } else {
+            vec![
+                egui::pos2(a.x, a.y + sa.y / 2.0),
+                egui::pos2(b.x, b.y - sb.y / 2.0),
+            ]
+        };
+        edges.push((pts, k));
+    }
+
+    let rows = n.div_ceil(cols);
+    Geometry { nodes, edges, w: cols as f32 * cell_w, h: rows as f32 * cell_h }
 }
 
 fn sample_bezier(b: &[(f64, f64); 4], n: usize) -> Vec<egui::Pos2> {
@@ -384,7 +459,7 @@ impl Session {
         let parsed = flow::load(flow_path, flow_cfg)?;
         let node_to_step: HashMap<String, usize> =
             parsed.steps.iter().enumerate().map(|(i, s)| (s.node_id.clone(), i)).collect();
-        let dir = LayoutDir::LR;
+        let dir = LayoutDir::Snake; // default: seluruh flow muat layar tanpa scroll
         let geo = build_geometry(&parsed.mermaid_src, &node_to_step, dir)?;
         let meta: Vec<StepMeta> = parsed
             .steps
@@ -487,8 +562,11 @@ impl Session {
         }
     }
 
-    fn toggle_dir(&mut self) {
-        self.dir = if self.dir == LayoutDir::LR { LayoutDir::TD } else { LayoutDir::LR };
+    fn set_dir(&mut self, dir: LayoutDir) {
+        if dir == self.dir {
+            return;
+        }
+        self.dir = dir;
         if let Ok(g) = build_geometry(&self.mermaid_src, &self.node_to_step, self.dir) {
             self.geo = g;
             self.fitted = false;
@@ -786,9 +864,11 @@ impl App {
                     let _ = sess.tx.send(Cmd::Reset);
                 }
                 ui.separator();
-                if ui.button(if sess.dir == LayoutDir::LR { "⇊ TD" } else { "⇉ LR" }).on_hover_text("ganti arah layout").clicked() {
-                    sess.toggle_dir();
-                }
+                let mut dir = sess.dir;
+                ui.selectable_value(&mut dir, LayoutDir::Snake, "🐍 Ular").on_hover_text("lipat jadi beberapa baris — muat layar");
+                ui.selectable_value(&mut dir, LayoutDir::LR, "⇉ LR");
+                ui.selectable_value(&mut dir, LayoutDir::TD, "⇊ TD");
+                sess.set_dir(dir);
                 if ui.button("⤢ Fit").clicked() {
                     sess.fitted = false;
                 }
@@ -910,9 +990,14 @@ impl App {
                 sess.fitted = true;
             }
             if let Some(i) = sess.center_on.take() {
-                if let Some(sn) = sess.geo.nodes.iter().find(|n| n.step == i) {
-                    let want = rect.center() - rect.min;
-                    sess.pan = want - egui::vec2(sn.center.x * sess.zoom, sn.center.y * sess.zoom);
+                // Follow hanya perlu bila flow TIDAK muat penuh di viewport
+                // (di mode Ular biasanya muat → view diam, tak loncat-loncat).
+                let fits = sess.geo.w * sess.zoom <= rect.width() && sess.geo.h * sess.zoom <= rect.height();
+                if !fits {
+                    if let Some(sn) = sess.geo.nodes.iter().find(|n| n.step == i) {
+                        let want = rect.center() - rect.min;
+                        sess.pan = want - egui::vec2(sn.center.x * sess.zoom, sn.center.y * sess.zoom);
+                    }
                 }
             }
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
