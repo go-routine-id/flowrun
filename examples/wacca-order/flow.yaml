@@ -1,0 +1,96 @@
+# Sidecar runner untuk examples/wacca-order/flow.mmd — alur order WACCA
+# end-to-end (customer ↔ owner) sampai selesai. E2E lunas: pakai pay_mode=cod.
+#
+# Catatan penting kontrak backend:
+# - Dua profil auth BERBEDA: `customer` (app customer) & `owner` (app outlet;
+#   org ada di dalam claim JWT, wajib email-verified).
+# - `payment_method_id` diisi dari env file (dot-path tak bisa "cari by code").
+# - Re-run n05 SETELAH price_proposed = re-weigh → order mundur + charge lama
+#   di-'abandoned' (perilaku B1) — berguna untuk uji manual, bukan happy path.
+
+auth_profiles: [customer, owner]
+
+vars:
+  pay_mode: cod # cod → e2e lunas tanpa gateway; digital → n10 di-skip
+
+steps:
+  n00:
+    auth: customer
+    request: GET /api/v1/payment-methods
+    note: informasional — payment_method_id diambil dari env file
+
+  n01:
+    auth: customer
+    request: POST /api/v1/customer/orders
+    body:
+      outlet_id: "{{outlet_id}}"
+      delivery_method: self_dropoff
+      note: order dari flowrun
+      items:
+        - item_id: "{{item_id}}"
+          unit_of_measure: Kg
+          quantity: 3
+          estimated_pcs: 5
+    capture: { order_id: data.id }
+    assert: { status: 2xx, "data.status": pending }
+
+  n02:
+    auth: owner
+    request: GET /api/v1/tenant/orders
+
+  n03:
+    auth: owner
+    request: GET /api/v1/tenant/orders/{{order_id}}
+    capture: { order_list_id: data.order_lists.0.id }
+
+  n04:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/accept
+    assert: { "data.status": accepted }
+
+  n05:
+    auth: owner
+    request: PATCH /api/v1/tenant/order-list/{{order_list_id}}/set-final-quantity
+    body: { final_quantity: 3.5, actual_pcs: 6, note: "timbang (flowrun)" }
+    note: re-run setelah n06 = re-weigh (order mundur, charge abandoned — B1)
+
+  n06:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/final-price
+    body: {}
+    assert: { "data.status": price_proposed }
+
+  n07:
+    auth: customer
+    request: GET /api/v1/customer/orders/{{order_id}}
+
+  n08:
+    auth: customer
+    request: PATCH /api/v1/customer/orders/{{order_id}}/add-payment-method
+    body: { payment_method_id: "{{payment_method_id}}" }
+    note: 502 = fail-loud (harga berubah di tengah); 409 = status berubah (TOCTOU)
+
+  n09:
+    auth: customer
+    request: POST /api/v1/customer/orders/{{order_id}}/approve-price
+    assert: { "data.status": processing }
+
+  n10:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/confirm-cod
+    body: {}
+    skip_if: "pay_mode != cod"
+    note: digital → bayar QR/VA di gateway (di luar runner), langkah ini di-skip
+
+  n11:
+    auth: owner
+    request: PATCH /api/v1/tenant/order-list/{{order_list_id}}/status-finished
+
+  n12:
+    auth: customer
+    request: POST /api/v1/customer/orders/{{order_id}}/confirm-receipt
+    assert: { "data.status": completed }
+
+  n13:
+    auth: customer
+    request: GET /api/v1/customer/orders/{{order_id}}/timeline
