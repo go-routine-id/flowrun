@@ -287,6 +287,12 @@ struct App {
     rx: Receiver<Evt>,
     // rect layar terakhir tiap node (untuk hit-test klik).
     hitboxes: Vec<(usize, egui::Rect)>,
+    // pan/zoom kanvas (ala n8n).
+    zoom: f32,
+    pan: egui::Vec2,
+    fitted: bool,
+    follow: bool,               // view mengikuti node aktif
+    center_on: Option<usize>,   // permintaan center (diproses saat canvas tahu rect)
 }
 
 impl App {
@@ -296,6 +302,9 @@ impl App {
                 Evt::Started(i) => {
                     self.states[i] = NodeState::Current;
                     self.selected = Some(i);
+                    if self.follow {
+                        self.center_on = Some(i);
+                    }
                 }
                 Evt::Done(r) => {
                     let idx = r.idx;
@@ -361,16 +370,20 @@ impl eframe::App for App {
                 if ui.button("↺ Reset").clicked() {
                     let _ = self.tx.send(Cmd::Reset);
                 }
+                if ui.button("⤢ Fit").clicked() {
+                    self.fitted = false; // re-fit frame berikutnya
+                }
+                ui.toggle_value(&mut self.follow, "👁 Follow");
                 ui.separator();
                 let done = self.states.iter().filter(|s| matches!(s, NodeState::Ok)).count();
                 let fail = self.states.iter().filter(|s| matches!(s, NodeState::Fail)).count();
                 ui.label(format!("progress {}/{}   ✅ {done}  ❌ {fail}", self.cursor, self.total));
-                ui.horizontal(|ui| {
-                    legend(ui, rgb(0x2c4a7a), "Customer");
-                    legend(ui, rgb(0x7a5320), "Owner");
-                    legend(ui, rgb(0x22c55e), "ok");
-                    legend(ui, rgb(0xef4444), "fail");
-                });
+                legend(ui, rgb(0x2c4a7a), "Customer");
+                legend(ui, rgb(0x7a5320), "Owner");
+                legend(ui, rgb(0x22c55e), "ok");
+                legend(ui, rgb(0xef4444), "fail");
+                ui.separator();
+                ui.small("scroll = zoom · drag = geser");
             });
             ui.add_space(4.0);
         });
@@ -430,17 +443,52 @@ impl eframe::App for App {
             });
         });
 
-        // ---- canvas ----
+        // ---- canvas (pan + zoom ala n8n) ----
         egui::CentralPanel::default().show(ctx, |ui| {
-            let (resp, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::click());
+            let (resp, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
             let rect = resp.rect;
-            let margin = 24.0;
-            let sx = (rect.width() - 2.0 * margin) / self.geo.w.max(1.0);
-            let sy = (rect.height() - 2.0 * margin) / self.geo.h.max(1.0);
-            let scale = sx.min(sy).max(0.05);
-            let ox = rect.min.x + margin + (rect.width() - 2.0 * margin - self.geo.w * scale) / 2.0;
-            let oy = rect.min.y + margin + (rect.height() - 2.0 * margin - self.geo.h * scale) / 2.0;
-            let tf = |p: egui::Pos2| egui::pos2(ox + p.x * scale, oy + p.y * scale);
+            painter.rect_filled(rect, egui::Rounding::ZERO, rgb(0x14161b));
+
+            // Fit-to-view sekali di awal (lihat seluruh flow), lalu user zoom/pan.
+            let margin = 40.0;
+            if !self.fitted && self.geo.w > 1.0 {
+                let sx = (rect.width() - 2.0 * margin) / self.geo.w;
+                let sy = (rect.height() - 2.0 * margin) / self.geo.h;
+                // Floor 0.8 supaya label terbaca dari awal (ribbon lebar → pan/follow).
+                self.zoom = sx.min(sy).clamp(0.8, 2.0);
+                self.pan = egui::vec2(
+                    (rect.width() - self.geo.w * self.zoom) / 2.0,
+                    (rect.height() - self.geo.h * self.zoom) / 2.0,
+                );
+                self.center_on = Some(0);
+                self.fitted = true;
+            }
+            // Auto-follow: center-kan node aktif (setelah zoom diketahui).
+            if let Some(i) = self.center_on.take() {
+                if let Some(sn) = self.geo.nodes.iter().find(|n| n.step == i) {
+                    let want = rect.center() - rect.min;
+                    self.pan = want - egui::vec2(sn.center.x * self.zoom, sn.center.y * self.zoom);
+                }
+            }
+
+            // Zoom scroll (anchored di kursor).
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 && resp.hovered() {
+                if let Some(p) = resp.hover_pos() {
+                    let old = self.zoom;
+                    self.zoom = (self.zoom * (1.0 + scroll * 0.0015)).clamp(0.15, 6.0);
+                    let s = (p - rect.min - self.pan) / old; // titik scene di bawah kursor
+                    self.pan = (p - rect.min) - s * self.zoom;
+                }
+            }
+            // Pan drag → user ambil alih (matikan follow).
+            if resp.dragged() {
+                self.pan += resp.drag_delta();
+                self.follow = false;
+            }
+            let zoom = self.zoom;
+            let base = rect.min + self.pan;
+            let tf = |p: egui::Pos2| base + egui::vec2(p.x * zoom, p.y * zoom);
 
             // edges
             for (pts, src) in &self.geo.edges {
@@ -456,7 +504,7 @@ impl eframe::App for App {
             self.hitboxes.clear();
             for sn in &self.geo.nodes {
                 let c = tf(sn.center);
-                let size = sn.size * scale;
+                let size = sn.size * zoom;
                 let r = egui::Rect::from_center_size(c, size);
                 self.hitboxes.push((sn.step, r));
                 let st = self.states[sn.step];
@@ -467,13 +515,17 @@ impl eframe::App for App {
                 let border = if sel { rgb(0xffffff) } else { rgb(0x14161b) };
                 painter.rect_stroke(r, egui::Rounding::same(6.0), egui::Stroke::new(if sel { 2.5 } else { 1.0 }, border));
                 let txt_col = if matches!(st, NodeState::Idle | NodeState::Current) { rgb(0xffffff) } else { rgb(0x0b1220) };
-                painter.text(
-                    c,
-                    egui::Align2::CENTER_CENTER,
-                    ellipsize(&sn.label, 22),
-                    egui::FontId::proportional((11.0 * scale).clamp(9.0, 13.0)),
-                    txt_col,
-                );
+                // Sembunyikan label saat terlalu kecil (zoom jauh) agar tak jadi bercak.
+                if size.x > 34.0 {
+                    let chars = (size.x / (6.0 * zoom).max(3.0)) as usize;
+                    painter.text(
+                        c,
+                        egui::Align2::CENTER_CENTER,
+                        ellipsize(&sn.label, chars.clamp(4, 40)),
+                        egui::FontId::proportional((11.0 * zoom).clamp(9.0, 20.0)),
+                        txt_col,
+                    );
+                }
             }
 
             // klik → pilih node
@@ -565,6 +617,11 @@ fn main() -> anyhow::Result<()> {
         tx: cmd_tx,
         rx: evt_rx,
         hitboxes: Vec::new(),
+        zoom: 1.0,
+        pan: egui::Vec2::ZERO,
+        fitted: false,
+        follow: true,
+        center_on: None,
     };
 
     let native = eframe::NativeOptions {
