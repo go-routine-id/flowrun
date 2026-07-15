@@ -94,10 +94,16 @@ fn real_main() -> Result<bool> {
         Cmd::Run { flow, config, env, auto, svg, serve, vars, timeout } => {
             let flow_cfg = config::load_flow_config(&config)?;
             let env_cfg = config::load_env_config(&env)?;
-            // Validasi token profil yang dideklarasikan flow tersedia di env.
+            // Validasi token profil yang dideklarasikan flow tersedia & TIDAK
+            // kosong di env — token kosong berarti `Bearer ` dikirim diam-diam
+            // dan kegagalan baru muncul membingungkan di tengah flow.
             for p in &flow_cfg.auth_profiles {
-                if !env_cfg.tokens.contains_key(p) {
-                    anyhow::bail!("token profil '{p}' tidak ada di env file {}", env.display());
+                match env_cfg.tokens.get(p) {
+                    None => anyhow::bail!("token profil '{p}' tidak ada di env file {}", env.display()),
+                    Some(t) if t.trim().is_empty() => {
+                        anyhow::bail!("token profil '{p}' KOSONG di env file {}", env.display())
+                    }
+                    Some(_) => {}
                 }
             }
             let mut ctx = Ctx::build(&flow_cfg, env_cfg, &vars);
