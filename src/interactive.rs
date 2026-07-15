@@ -5,9 +5,9 @@ use std::io::{BufRead, Write};
 
 use anyhow::Result;
 
-use crate::engine::{run_step, Ctx, Outcome};
-use crate::flow::Flow;
-use crate::runner_ui::{print_report, Ui};
+use flowrun::engine::{run_step, Ctx, Outcome};
+use flowrun::flow::Flow;
+use flowrun::runner_ui::{print_report, Ui};
 
 pub fn run(flow: &Flow, ctx: &mut Ctx, client: &reqwest::blocking::Client, ui: &mut Ui) -> Result<bool> {
     let stdin = std::io::stdin();

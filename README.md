@@ -32,6 +32,17 @@ flowrun render -f flow.mmd -o flow.svg
 
 Mode interaktif: `Enter`=run · `s`=skip · `r`=retry (setelah gagal) · `vars`=lihat context · `q`=quit. Node di SVG berubah warna: 🟡 current · 🟢 ok · 🔴 fail · abu = skip · ungu = manual.
 
+## Desktop (egui) — opsional
+
+Jendela native (bukan browser): canvas graf digambar dari **flowmaid `scene` API** (tata-letak Sugiyama), egui hanya render + interaktivitas. Tombol Next/Auto/Skip/Reset, klik node → panel response.
+
+```sh
+cargo run --features gui --bin flowrun-gui -- \
+  -f examples/wacca-order/flow.mmd -c examples/wacca-order/flow.yaml -e examples/wacca-order/dev.yaml
+```
+
+Pembagian peran: **flowmaid** = layout & bentuk graf · **egui** = render + kontrol · **engine flowrun** = eksekusi HTTP (worker thread, UI tetap responsif). Feature `gui` opsional → CLI inti tetap ringan tanpa dependensi GUI.
+
 ## Skema `flow.yaml`
 
 ```yaml

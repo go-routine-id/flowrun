@@ -2,12 +2,7 @@
 //! engine runner HTTP terpisah. Flow apa pun = `flow.mmd` (graf) + `flow.yaml`
 //! (config runner per node-id) + env file per-deployment (token/base_url).
 
-mod config;
-mod diagram;
-mod engine;
-mod flow;
 mod interactive;
-mod runner_ui;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -16,8 +11,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use crate::engine::{run_step, Ctx, Outcome};
-use crate::runner_ui::{print_report, Ui};
+use flowrun::config;
+use flowrun::diagram;
+use flowrun::engine::{run_step, Ctx, Outcome};
+use flowrun::flow;
+use flowrun::runner_ui::{print_report, Ui};
 
 #[derive(Parser)]
 #[command(name = "flowrun", version, about = "Flow runner dinamis: mermaid + engine HTTP next-next")]
@@ -127,6 +125,16 @@ fn real_main() -> Result<bool> {
 
             let (pass, fail, skip, idle) = ui.tally();
             println!("\n=== ringkasan: ✅ {pass}  ❌ {fail}  ⏭ {skip}  ⚪ {idle} ===");
+
+            // Preview tetap hidup setelah flow selesai (mode interaktif) agar
+            // diagram terakhir bisa dilihat di browser. Mode --auto (CI) tetap
+            // exit normal supaya exit-code kepakai.
+            if let (Some(addr), false) = (&serve, auto) {
+                println!("🔎 preview masih hidup di http://{addr} — Ctrl-C untuk berhenti");
+                loop {
+                    std::thread::sleep(Duration::from_secs(3600));
+                }
+            }
             Ok(ok)
         }
     }
