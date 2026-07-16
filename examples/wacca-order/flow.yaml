@@ -41,7 +41,7 @@ steps:
   n03:
     auth: owner
     request: GET /api/v1/tenant/orders/{{order_id}}
-    capture: { order_list_id: data.order_lists.0.id }
+    capture: { order_list_id: data.items.0.id }
 
   n04:
     auth: owner

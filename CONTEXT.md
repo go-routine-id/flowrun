@@ -32,6 +32,11 @@ Tiga pemisahan yang DISENGAJA (jangan dicampur lagi):
 (`tools/wacca_mock.py`). Blocker: butuh 2 JWT (customer + owner) environment dev
 WACCA; owner login via Google OAuth sehingga tak bisa diambil otomatis.
 Base URL dev WACCA bisa dilihat di `.env.dev` repo wacca-mobile (via VPN internal).
+Catatan 16 Jul 2026 (sesi wacca): (1) kunci JWT account-service dev DIROTASI —
+semua token lama invalid, minta token segar saat mau e2e; (2) path capture
+`order_list_id` sudah dibetulkan ke `data.items.0.id` — diverifikasi langsung
+dari `wacca-service app/controller/tenant/order/model.go` (field `items`,
+BUKAN `order_lists`); body `{}` utk final-price & confirm-cod valid (opsional).
 
 ## Struktur repo
 

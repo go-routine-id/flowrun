@@ -58,7 +58,7 @@ steps:
       outlet_id: "{{outlet_id}}"
     capture:                       # response JSON → context vars (dot-path)
       order_id: data.id
-      order_list_id: data.order_lists.0.id
+      order_list_id: data.items.0.id
     assert:                        # gagal → langkah merah (+ exit ≠ 0 di --auto)
       status: 2xx                  # kelas (2xx) atau persis (409)
       "data.status": pending       # equality dot-path
