@@ -1,0 +1,9 @@
+# Env demo — menunjuk mock lokal, token dummy (mock hanya cek ada Bearer).
+base_url: "http://127.0.0.1:18923"
+tokens:
+  customer: "demo-customer-token"
+  owner: "demo-owner-token"
+vars:
+  outlet_id: "0d3m0000-3333-7000-8000-0000000outlet"
+  item_id: "0d3m0000-4444-7000-8000-000000000item"
+  payment_method_id: "pm-cod"
