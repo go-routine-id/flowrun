@@ -146,24 +146,41 @@ fn run_auto(
     client: &reqwest::blocking::Client,
     ui: &mut Ui,
 ) -> Result<bool> {
+    // Susuri graf dari start mengikuti edge (kondisi dievaluasi atas vars —
+    // SETELAH step jalan, agar capture step itu bisa dipakai memilih cabang).
     let total = parsed.steps.len();
-    for (i, step) in parsed.steps.iter().enumerate() {
-        ui.set_current(i)?;
-        println!("\n[{}/{}] {} ({})", i + 1, total, step.title, step.node_id);
+    let mut cur = parsed.start;
+    let mut ran = 0usize;
+    loop {
+        let step = &parsed.steps[cur];
+        ran += 1;
+        ui.set_current(cur)?;
+        println!("\n[{ran}/≤{total}] {} ({})", step.title, step.node_id);
         if step.cfg.manual || step.cfg.request.is_none() {
             println!("   ✋ manual — dilewati di mode auto");
-            ui.set_manual(i)?;
-            continue;
+            ui.set_manual(cur)?;
+        } else {
+            let rep = run_step(step, ctx, client);
+            print_report(&rep);
+            match rep.outcome {
+                Outcome::Passed => ui.set_ok(cur)?,
+                Outcome::Skipped(_) => ui.set_skip(cur)?,
+                Outcome::Manual => ui.set_manual(cur)?,
+                Outcome::Failed(_) => {
+                    ui.set_fail(cur)?;
+                    return Ok(false); // stop-on-fail → exit code ≠ 0
+                }
+            }
         }
-        let rep = run_step(step, ctx, client);
-        print_report(&rep);
-        match rep.outcome {
-            Outcome::Passed => ui.set_ok(i)?,
-            Outcome::Skipped(_) => ui.set_skip(i)?,
-            Outcome::Manual => ui.set_manual(i)?,
-            Outcome::Failed(_) => {
-                ui.set_fail(i)?;
-                return Ok(false); // stop-on-fail → exit code ≠ 0
+        match flowrun::engine::choose_next(&parsed.outgoing(cur), &ctx.vars)? {
+            flowrun::engine::Next::Advance(nx) => cur = nx,
+            flowrun::engine::Next::End => break,
+            flowrun::engine::Next::Pick(opts) => {
+                println!("   ⚠ cabang ambigu di '{}' — mode auto butuh kondisi edge yang deterministik:", step.node_id);
+                for (t, label) in &opts {
+                    println!("     → {} ({label})", parsed.steps[*t].node_id);
+                }
+                anyhow::bail!("cabang ambigu — tambahkan kondisi |var == nilai| / |else|, atau jalankan interaktif");
             }
         }
     }

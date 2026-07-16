@@ -1,0 +1,86 @@
+# Contoh BERCABANG: keputusan owner (terima/tolak) + metode bayar (cod/digital).
+# Kondisi cabang ada di label edge flow.mmd — dievaluasi atas context vars:
+#   n03 -->|keputusan == terima| n04     n03 -->|else| nR
+#   n09 -->|pay_mode == cod| n10         n09 -->|else| nPay (manual)
+# Ubah jalur tanpa menyentuh graf: --var keputusan=tolak / --var pay_mode=digital.
+# nPay tidak punya config → otomatis langkah manual (bayar nyata di gateway).
+
+auth_profiles: [customer, owner]
+
+vars:
+  keputusan: terima
+  pay_mode: cod
+
+steps:
+  n01:
+    auth: customer
+    request: POST /api/v1/customer/orders
+    body:
+      outlet_id: "{{outlet_id}}"
+      delivery_method: self_dropoff
+      note: order dari flowrun (branched)
+      items:
+        - item_id: "{{item_id}}"
+          unit_of_measure: Kg
+          quantity: 3
+          estimated_pcs: 5
+    capture: { order_id: data.id }
+    assert: { status: 2xx, "data.status": pending }
+
+  n03:
+    auth: owner
+    request: GET /api/v1/tenant/orders/{{order_id}}
+    capture: { order_list_id: data.order_lists.0.id }
+    note: setelah step ini runner memilih cabang berdasar var `keputusan`
+
+  n04:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/accept
+    assert: { "data.status": accepted }
+
+  nR:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/reject
+    body: { reason: "kapasitas penuh (flowrun demo)" }
+    assert: { "data.status": cancelled }
+    note: jalur akhir — order ditolak
+
+  n05:
+    auth: owner
+    request: PATCH /api/v1/tenant/order-list/{{order_list_id}}/set-final-quantity
+    body: { final_quantity: 3.5, actual_pcs: 6, note: "timbang (flowrun)" }
+
+  n06:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/final-price
+    body: {}
+    assert: { "data.status": price_proposed }
+
+  n08:
+    auth: customer
+    request: PATCH /api/v1/customer/orders/{{order_id}}/add-payment-method
+    body: { payment_method_id: "{{payment_method_id}}" }
+
+  n09:
+    auth: customer
+    request: POST /api/v1/customer/orders/{{order_id}}/approve-price
+    assert: { "data.status": processing }
+    note: setelah step ini runner memilih cabang berdasar var `pay_mode`
+
+  n10:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/confirm-cod
+    body: {}
+
+  n11:
+    auth: owner
+    request: PATCH /api/v1/tenant/order-list/{{order_list_id}}/status-finished
+
+  n12:
+    auth: customer
+    request: POST /api/v1/customer/orders/{{order_id}}/confirm-receipt
+    assert: { "data.status": completed }
+
+  n13:
+    auth: customer
+    request: GET /api/v1/customer/orders/{{order_id}}/timeline

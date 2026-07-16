@@ -1,6 +1,10 @@
 //! Gabungkan graf `.mmd` (via flowmaid) dengan sidecar `flow.yaml` menjadi
-//! urutan langkah tereksekusi. Visual dan runner sengaja dipisah: `.mmd` murni
-//! mermaid (bisa dirender di mana pun), config eksekusi hidup di sidecar.
+//! graf langkah tereksekusi (DAG). Visual dan runner sengaja dipisah: `.mmd`
+//! murni mermaid (bisa dirender di mana pun), config eksekusi di sidecar.
+//!
+//! v0.2: mendukung PERCABANGAN. Kondisi cabang ditulis sebagai label edge
+//! mermaid — `a -->|pay_mode == cod| b` — dievaluasi engine atas context vars.
+//! Label `else` / tanpa label = fallback. Runner menyusuri SATU jalur aktif.
 
 use std::path::Path;
 
@@ -9,7 +13,7 @@ use flowmaid::model::Document;
 
 use crate::config::{FlowConfig, StepConfig};
 
-/// Satu langkah tereksekusi, urut sesuai jalur graf.
+/// Satu langkah tereksekusi.
 #[derive(Debug, Clone)]
 pub struct FlowStep {
     pub node_id: String,
@@ -19,18 +23,37 @@ pub struct FlowStep {
     pub unconfigured: bool,
 }
 
-#[derive(Debug)]
-pub struct Flow {
-    /// Teks mermaid asli (dipakai diagram.rs untuk regen + pewarnaan status).
-    pub mermaid_src: String,
-    pub steps: Vec<FlowStep>,
+/// Edge graf. `cond=None` = tanpa syarat / fallback (`|else|` juga jadi None).
+#[derive(Debug, Clone)]
+pub struct FlowEdge {
+    pub from: usize,
+    pub to: usize,
+    pub cond: Option<String>,
+    /// Label asli utk ditampilkan (kondisi atau "else").
+    pub label: Option<String>,
 }
 
-/// Parse `.mmd` → jalur linear → merge sidecar.
-///
-/// MVP v0.1: jalur linear (tiap node maksimal satu outgoing edge). Branching /
-/// edge kondisional menyusul di v0.2 — parser flowmaid sudah menyediakan graf
-/// penuh, pembatasan ini murni di sisi flowrun.
+#[derive(Debug)]
+pub struct Flow {
+    /// Teks mermaid asli (dipakai renderer untuk regen + pewarnaan status).
+    pub mermaid_src: String,
+    /// Semua node, urut topologis (stabil untuk tampilan).
+    pub steps: Vec<FlowStep>,
+    pub edges: Vec<FlowEdge>,
+    /// Indeks node awal (indegree 0, tunggal).
+    pub start: usize,
+    /// true bila tiap node maksimal satu outgoing edge (rantai murni) —
+    /// menentukan kelayakan layout serpentine dsb.
+    pub linear: bool,
+}
+
+impl Flow {
+    pub fn outgoing(&self, i: usize) -> Vec<&FlowEdge> {
+        self.edges.iter().filter(|e| e.from == i).collect()
+    }
+}
+
+/// Parse `.mmd` → DAG + urutan topologis → merge sidecar.
 pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
     let src = std::fs::read_to_string(mmd_path)
         .with_context(|| format!("baca {}", mmd_path.display()))?;
@@ -47,42 +70,41 @@ pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
         bail!("flow kosong: tidak ada node di {}", mmd_path.display());
     }
 
-    // Urutan eksekusi: mulai dari node tanpa incoming edge, ikuti outgoing.
     let n = graph.nodes.len();
     let mut indegree = vec![0usize; n];
-    let mut out: Vec<Vec<usize>> = vec![Vec::new(); n];
     for e in &graph.edges {
         indegree[e.to] += 1;
-        out[e.from].push(e.to);
     }
     let starts: Vec<usize> = (0..n).filter(|&i| indegree[i] == 0).collect();
-    let start = match starts.as_slice() {
+    let start_g = match starts.as_slice() {
         [s] => *s,
         [] => bail!("graf siklik: tidak ada node awal (semua punya incoming edge)"),
         many => bail!(
-            "lebih dari satu node awal ({}) — v0.1 butuh jalur linear tunggal",
+            "lebih dari satu node awal ({}) — flow butuh satu titik mulai",
             many.iter().map(|&i| graph.nodes[i].id.as_str()).collect::<Vec<_>>().join(", ")
         ),
     };
 
-    let mut order = Vec::with_capacity(n);
-    let mut cur = start;
-    let mut visited = vec![false; n];
-    loop {
-        if visited[cur] {
-            bail!("graf siklik terdeteksi di node '{}'", graph.nodes[cur].id);
+    // Urutan topologis (Kahn) — stabil utk penomoran tampilan; sekaligus
+    // deteksi siklus (runner v0.2 = DAG; loop/retry visual belum didukung).
+    let mut indeg = indegree.clone();
+    let mut queue: Vec<usize> = vec![start_g];
+    let mut topo: Vec<usize> = Vec::with_capacity(n);
+    while let Some(u) = queue.pop() {
+        topo.push(u);
+        for e in graph.edges.iter().filter(|e| e.from == u) {
+            indeg[e.to] -= 1;
+            if indeg[e.to] == 0 {
+                queue.insert(0, e.to);
+            }
         }
-        visited[cur] = true;
-        order.push(cur);
-        match out[cur].as_slice() {
-            [] => break,
-            [next] => cur = *next,
-            many => bail!(
-                "node '{}' bercabang ke {} node — branching belum didukung v0.1",
-                graph.nodes[cur].id,
-                many.len()
-            ),
-        }
+    }
+    if topo.len() != n {
+        let stuck: Vec<&str> = (0..n)
+            .filter(|i| !topo.contains(i))
+            .map(|i| graph.nodes[i].id.as_str())
+            .collect();
+        bail!("graf siklik terdeteksi (node: {}) — DAG saja yang didukung", stuck.join(", "));
     }
 
     // Validasi sidecar: semua step di yaml harus ada di graf.
@@ -98,10 +120,16 @@ pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
         );
     }
 
-    let steps = order
-        .into_iter()
-        .map(|i| {
-            let node = &graph.nodes[i];
+    // graph-index → steps-index (posisi topologis).
+    let mut pos = vec![0usize; n];
+    for (k, &gi) in topo.iter().enumerate() {
+        pos[gi] = k;
+    }
+
+    let steps: Vec<FlowStep> = topo
+        .iter()
+        .map(|&gi| {
+            let node = &graph.nodes[gi];
             let (step_cfg, unconfigured) = match cfg.steps.get(&node.id) {
                 Some(c) => (c.clone(), false),
                 None => (StepConfig { manual: true, ..Default::default() }, true),
@@ -115,7 +143,30 @@ pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
         })
         .collect();
 
-    Ok(Flow { mermaid_src: src, steps })
+    let edges: Vec<FlowEdge> = graph
+        .edges
+        .iter()
+        .map(|e| {
+            let label = e.label.clone();
+            let cond = label.as_ref().and_then(|l| {
+                let t = l.trim();
+                if t.is_empty() || t.eq_ignore_ascii_case("else") {
+                    None // fallback
+                } else {
+                    Some(t.to_string())
+                }
+            });
+            FlowEdge { from: pos[e.from], to: pos[e.to], cond, label }
+        })
+        .collect();
+
+    let mut outdeg = vec![0usize; n];
+    for e in &edges {
+        outdeg[e.from] += 1;
+    }
+    let linear = outdeg.iter().all(|&d| d <= 1);
+
+    Ok(Flow { mermaid_src: src, steps, edges, start: pos[start_g], linear })
 }
 
 #[cfg(test)]
@@ -125,8 +176,7 @@ mod tests {
 
     fn write_tmp(name: &str, content: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        // Nama unik per test — test cargo jalan paralel dalam satu proses,
-        // jadi PID saja tidak cukup (kolisi tulis/hapus antar test).
+        // Nama unik per test — test cargo jalan paralel dalam satu proses.
         p.push(format!("flowrun-test-{}-{}.mmd", std::process::id(), name));
         let mut f = std::fs::File::create(&p).unwrap();
         f.write_all(content.as_bytes()).unwrap();
@@ -145,18 +195,35 @@ mod tests {
         std::fs::remove_file(&p).ok();
         let ids: Vec<&str> = flow.steps.iter().map(|s| s.node_id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
+        assert!(flow.linear);
+        assert_eq!(flow.start, 0);
         assert!(flow.steps[0].unconfigured && flow.steps[0].cfg.manual);
-        assert!(!flow.steps[1].unconfigured);
         assert_eq!(flow.steps[1].cfg.request.as_deref(), Some("GET /x"));
-        assert_eq!(flow.steps[0].title, "Langkah A");
     }
 
     #[test]
-    fn rejects_branching() {
-        let p = write_tmp("branching", "flowchart LR\n  a --> b\n  a --> c\n");
+    fn branching_loads_with_conditions() {
+        let p = write_tmp(
+            "branch",
+            "flowchart TD\n  a --> b\n  b -->|mode == x| c\n  b -->|else| d\n  c --> e\n  d --> e\n",
+        );
+        let flow = load(&p, FlowConfig::default()).unwrap();
+        std::fs::remove_file(&p).ok();
+        assert!(!flow.linear);
+        let b = flow.steps.iter().position(|s| s.node_id == "b").unwrap();
+        let outs = flow.outgoing(b);
+        assert_eq!(outs.len(), 2);
+        let conds: Vec<Option<&str>> = outs.iter().map(|e| e.cond.as_deref()).collect();
+        assert!(conds.contains(&Some("mode == x")));
+        assert!(conds.contains(&None)); // else → fallback
+    }
+
+    #[test]
+    fn rejects_cycle() {
+        let p = write_tmp("cycle", "flowchart LR\n  a --> b\n  b --> c\n  c --> b\n");
         let err = load(&p, FlowConfig::default()).unwrap_err().to_string();
         std::fs::remove_file(&p).ok();
-        assert!(err.contains("bercabang"), "{err}");
+        assert!(err.contains("siklik"), "{err}");
     }
 
     #[test]

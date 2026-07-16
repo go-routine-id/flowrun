@@ -78,11 +78,32 @@ tokens: { customer: "eyJ...", owner: "eyJ..." }
 vars: { outlet_id: "uuid", item_id: "uuid" }
 ```
 
-## Batasan v0.1
+## Percabangan (v0.2)
 
-- Jalur **linear** (tiap node satu outgoing edge). Branching/edge kondisional → v0.2.
-- `skip_if` hanya `==` / `!=`; capture hanya dot-path (tanpa filter).
-- Report junit/json untuk CI → v0.2.
+Kondisi cabang ditulis sebagai **label edge mermaid**, dievaluasi atas context vars
+(termasuk hasil `capture` langkah sebelumnya):
+
+```mermaid
+n03 -->|keputusan == terima| n04
+n03 -->|else| nR
+n09 -->|pay_mode == cod| n10
+n09 -->|else| nPay
+```
+
+- Tepat satu kondisi true → runner mengikuti edge itu (satu jalur aktif).
+- Tidak ada yang true → edge `else`/tanpa label sebagai fallback.
+- Ambigu (0 atau >1 kandidat): **GUI bertanya** (modal pilih cabang); **`--auto` gagal
+  deterministik** dengan pesan jelas — test CI tak boleh menebak.
+- Node di cabang yang tak dilalui diredupkan saat jalur selesai.
+- Ganti jalur tanpa mengubah graf: `--var keputusan=tolak`, `--var pay_mode=digital`.
+- Contoh: `examples/wacca-order-branched/`. Layout Ular otomatis nonaktif untuk graf
+  bercabang (khusus rantai linear); pakai TD/LR.
+
+## Batasan saat ini
+
+- Graf harus **DAG** (siklus/loop-retry visual belum didukung).
+- `skip_if`/kondisi edge hanya `==` / `!=`; capture hanya dot-path (tanpa filter).
+- Report junit/json untuk CI → menyusul.
 
 ## Lisensi
 

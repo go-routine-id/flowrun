@@ -15,8 +15,8 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 
 use flowrun::config::{self, EnvConfig};
-use flowrun::engine::{run_step, Ctx, Outcome};
-use flowrun::flow::{self, FlowStep};
+use flowrun::engine::{choose_next, run_step, Ctx, Next, Outcome};
+use flowrun::flow::{self, FlowEdge, FlowStep};
 
 // ============================= CLI =============================
 
@@ -77,6 +77,8 @@ enum Cmd {
     /// Re-run node tertentu (mis. re-timbang utk skenario B1). Tidak memajukan
     /// cursor kecuali node itu memang node saat ini dan lolos.
     RunAt(usize),
+    /// Jawaban user atas cabang ambigu: target step berikutnya.
+    Choose(usize),
     Quit,
 }
 
@@ -95,6 +97,10 @@ struct StepResult {
 enum Evt {
     Started(usize),
     Done(StepResult),
+    /// Cabang ambigu — user harus memilih (target, label-kondisi).
+    NeedChoice(Vec<(usize, String)>),
+    /// Jalur mencapai ujung graf.
+    FlowDone,
     AutoDone,
     Reset,
 }
@@ -109,49 +115,113 @@ enum NodeState {
     Manual,
 }
 
-fn worker(mut ctx: Ctx, steps: Vec<FlowStep>, timeout: u64, rx: Receiver<Cmd>, tx: Sender<Evt>) {
+/// Hasil penentuan langkah berikutnya di worker.
+enum Moved {
+    Advanced,
+    Ended,
+    NeedPick,
+}
+
+struct Walker {
+    cur: usize,
+    start: usize,
+    finished: bool,
+    pending: bool,
+    adjacency: Vec<Vec<FlowEdge>>,
+}
+
+impl Walker {
+    /// Evaluasi outgoing edges dari `cur` atas vars → maju / selesai / tanya.
+    fn resolve_next(&mut self, ctx: &Ctx, tx: &Sender<Evt>) -> Moved {
+        let outs: Vec<&FlowEdge> = self.adjacency[self.cur].iter().collect();
+        match choose_next(&outs, &ctx.vars) {
+            Ok(Next::Advance(nx)) => {
+                self.cur = nx;
+                Moved::Advanced
+            }
+            Ok(Next::End) => {
+                self.finished = true;
+                let _ = tx.send(Evt::FlowDone);
+                Moved::Ended
+            }
+            Ok(Next::Pick(opts)) => {
+                self.pending = true;
+                let _ = tx.send(Evt::NeedChoice(opts));
+                Moved::NeedPick
+            }
+            Err(_) => {
+                // Ekspresi kondisi rusak → perlakukan sbg ambigu (user memilih).
+                self.pending = true;
+                let opts = self.adjacency[self.cur]
+                    .iter()
+                    .map(|e| (e.to, e.label.clone().unwrap_or_default()))
+                    .collect();
+                let _ = tx.send(Evt::NeedChoice(opts));
+                Moved::NeedPick
+            }
+        }
+    }
+}
+
+fn worker(
+    mut ctx: Ctx,
+    steps: Vec<FlowStep>,
+    adjacency: Vec<Vec<FlowEdge>>,
+    start: usize,
+    timeout: u64,
+    rx: Receiver<Cmd>,
+    tx: Sender<Evt>,
+) {
     let initial = ctx.vars.clone();
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(timeout))
         .build()
         .expect("build http client");
-    let n = steps.len();
-    let mut cursor = 0usize;
+    let mut w = Walker { cur: start, start, finished: false, pending: false, adjacency };
 
     while let Ok(cmd) = rx.recv() {
         match cmd {
             Cmd::Quit => break,
             Cmd::Reset => {
                 ctx.vars = initial.clone();
-                cursor = 0;
+                w.cur = w.start;
+                w.finished = false;
+                w.pending = false;
                 let _ = tx.send(Evt::Reset);
             }
+            Cmd::Choose(target) => {
+                if w.pending {
+                    w.pending = false;
+                    w.cur = target;
+                }
+            }
             Cmd::Skip => {
-                if cursor < n {
-                    let _ = tx.send(Evt::Done(skip_result(cursor, &ctx)));
-                    cursor += 1;
+                if !w.finished && !w.pending {
+                    let _ = tx.send(Evt::Done(skip_result(w.cur, &ctx)));
+                    w.resolve_next(&ctx, &tx);
                 }
             }
             Cmd::Next => {
-                if cursor < n && exec(&steps, &mut ctx, &client, &tx, cursor) {
-                    cursor += 1;
+                if !w.finished && !w.pending && exec(&steps, &mut ctx, &client, &tx, w.cur) {
+                    w.resolve_next(&ctx, &tx);
                 }
             }
             Cmd::RunAt(i) => {
-                if i < n {
+                if i < steps.len() {
                     let ok = exec(&steps, &mut ctx, &client, &tx, i);
-                    if ok && i == cursor {
-                        cursor += 1;
+                    if ok && i == w.cur && !w.finished && !w.pending {
+                        w.resolve_next(&ctx, &tx);
                     }
                 }
             }
             Cmd::Auto => {
-                while cursor < n {
-                    if exec(&steps, &mut ctx, &client, &tx, cursor) {
-                        cursor += 1;
-                        std::thread::sleep(Duration::from_millis(250));
-                    } else {
+                while !w.finished && !w.pending {
+                    if !exec(&steps, &mut ctx, &client, &tx, w.cur) {
                         break; // stop-on-fail
+                    }
+                    match w.resolve_next(&ctx, &tx) {
+                        Moved::Advanced => std::thread::sleep(Duration::from_millis(250)),
+                        _ => break,
                     }
                 }
                 let _ = tx.send(Evt::AutoDone);
@@ -426,9 +496,14 @@ struct Session {
     vars: Vec<(String, String)>,
     log: Vec<LogLine>,
     selected: Option<usize>,
-    cursor: usize,
     total: usize,
     auto_running: bool,
+    /// Cabang ambigu menunggu pilihan user: (target, label kondisi).
+    pending: Option<Vec<(usize, String)>>,
+    /// Jalur sudah mencapai ujung graf.
+    finished: bool,
+    /// Graf rantai murni? (menentukan kelayakan layout Ular.)
+    linear: bool,
     started: Instant,
     tx: Sender<Cmd>,
     rx: Receiver<Evt>,
@@ -459,7 +534,8 @@ impl Session {
         let parsed = flow::load(flow_path, flow_cfg)?;
         let node_to_step: HashMap<String, usize> =
             parsed.steps.iter().enumerate().map(|(i, s)| (s.node_id.clone(), i)).collect();
-        let dir = LayoutDir::Snake; // default: seluruh flow muat layar tanpa scroll
+        // Ular hanya utk rantai linear; graf bercabang lebih terbaca TD.
+        let dir = if parsed.linear { LayoutDir::Snake } else { LayoutDir::TD };
         let geo = build_geometry(&parsed.mermaid_src, &node_to_step, dir)?;
         let meta: Vec<StepMeta> = parsed
             .steps
@@ -477,7 +553,14 @@ impl Session {
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<Cmd>();
         let (evt_tx, evt_rx) = std::sync::mpsc::channel::<Evt>();
         let steps = parsed.steps.clone();
-        std::thread::spawn(move || worker(ctx, steps, timeout, cmd_rx, evt_tx));
+        // Adjacency per node utk graph-walk di worker.
+        let mut adjacency: Vec<Vec<FlowEdge>> = vec![Vec::new(); total];
+        for e in &parsed.edges {
+            adjacency[e.from].push(e.clone());
+        }
+        let start = parsed.start;
+        let linear = parsed.linear;
+        std::thread::spawn(move || worker(ctx, steps, adjacency, start, timeout, cmd_rx, evt_tx));
 
         Ok(Session {
             meta,
@@ -490,9 +573,11 @@ impl Session {
             vars: Vec::new(),
             log: Vec::new(),
             selected: None,
-            cursor: 0,
             total,
             auto_running: false,
+            pending: None,
+            finished: false,
+            linear,
             started: Instant::now(),
             tx: cmd_tx,
             rx: evt_rx,
@@ -527,9 +612,6 @@ impl Session {
                     self.states[idx] = r.state;
                     self.vars = r.vars.clone();
                     self.selected = Some(idx);
-                    if r.state != NodeState::Fail && idx + 1 > self.cursor {
-                        self.cursor = idx + 1;
-                    }
                     let (sym, col) = match r.state {
                         NodeState::Ok => ("✅", rgb(0x22c55e)),
                         NodeState::Fail => ("❌", rgb(0xef4444)),
@@ -545,17 +627,31 @@ impl Session {
                     self.logln(line, col);
                     self.results[idx] = Some(r);
                 }
+                Evt::NeedChoice(opts) => {
+                    let daftar = opts
+                        .iter()
+                        .map(|(t, l)| format!("{} ({l})", self.meta[*t].title))
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    self.logln(format!("🔀 pilih cabang: {daftar}"), rgb(0xeab308));
+                    self.pending = Some(opts);
+                }
+                Evt::FlowDone => {
+                    self.finished = true;
+                    self.logln("🎉 jalur selesai — node tak dilalui diredupkan".into(), rgb(0x22c55e));
+                }
                 Evt::AutoDone => {
                     self.auto_running = false;
-                    self.logln("auto selesai".into(), rgb(0x9ca3af));
+                    self.logln("auto berhenti".into(), rgb(0x9ca3af));
                 }
                 Evt::Reset => {
                     self.states.iter_mut().for_each(|s| *s = NodeState::Idle);
                     self.results.iter_mut().for_each(|r| *r = None);
-                    self.cursor = 0;
                     self.selected = None;
                     self.vars.clear();
                     self.auto_running = false;
+                    self.pending = None;
+                    self.finished = false;
                     self.logln("reset — siap dari awal".into(), rgb(0x9ca3af));
                 }
             }
@@ -563,8 +659,8 @@ impl Session {
     }
 
     fn set_dir(&mut self, dir: LayoutDir) {
-        if dir == self.dir {
-            return;
+        if dir == self.dir || (dir == LayoutDir::Snake && !self.linear) {
+            return; // Ular hanya utk rantai linear
         }
         self.dir = dir;
         if let Ok(g) = build_geometry(&self.mermaid_src, &self.node_to_step, self.dir) {
@@ -849,7 +945,7 @@ impl App {
                     back_to_picker = true;
                 }
                 ui.separator();
-                let can_step = sess.cursor < sess.total && !sess.auto_running;
+                let can_step = !sess.finished && !sess.auto_running && sess.pending.is_none();
                 if ui.add_enabled(can_step, egui::Button::new("▶ Next")).clicked() {
                     let _ = sess.tx.send(Cmd::Next);
                 }
@@ -865,7 +961,9 @@ impl App {
                 }
                 ui.separator();
                 let mut dir = sess.dir;
-                ui.selectable_value(&mut dir, LayoutDir::Snake, "🐍 Ular").on_hover_text("lipat jadi beberapa baris — muat layar");
+                if sess.linear {
+                    ui.selectable_value(&mut dir, LayoutDir::Snake, "🐍 Ular").on_hover_text("lipat jadi beberapa baris — muat layar");
+                }
                 ui.selectable_value(&mut dir, LayoutDir::LR, "⇉ LR");
                 ui.selectable_value(&mut dir, LayoutDir::TD, "⇊ TD");
                 sess.set_dir(dir);
@@ -874,9 +972,11 @@ impl App {
                 }
                 ui.toggle_value(&mut sess.follow, "👁 Follow");
                 ui.separator();
+                let visited = sess.states.iter().filter(|s| !matches!(s, NodeState::Idle)).count();
                 let done = sess.states.iter().filter(|s| matches!(s, NodeState::Ok)).count();
                 let fail = sess.states.iter().filter(|s| matches!(s, NodeState::Fail)).count();
-                ui.label(format!("progress {}/{}   ✅ {done}  ❌ {fail}", sess.cursor, sess.total));
+                let badge = if sess.finished { "  🎉 selesai" } else { "" };
+                ui.label(format!("dilalui {visited}/{}   ✅ {done}  ❌ {fail}{badge}", sess.total));
                 legend(ui, rgb(0x3b82f6), "Customer");
                 legend(ui, rgb(0xf59e0b), "Owner");
                 ui.small("scroll = zoom · drag = geser");
@@ -971,6 +1071,40 @@ impl App {
             });
         });
 
+        // ---- modal pilih cabang (cabang ambigu / tanpa kondisi) ----
+        let mut chosen: Option<usize> = None;
+        if let Some(opts) = sess.pending.clone() {
+            egui::Window::new("🔀 Pilih cabang")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
+                .show(ctx, |ui| {
+                    ui.label("Runner tiba di percabangan — jalur mana yang diambil?");
+                    ui.add_space(6.0);
+                    for (t, label) in &opts {
+                        let m = &sess.meta[*t];
+                        let txt = if label.is_empty() {
+                            format!("→ {}", m.title)
+                        } else {
+                            format!("→ {}   ({label})", m.title)
+                        };
+                        if ui.add(egui::Button::new(txt).min_size(egui::vec2(280.0, 28.0))).clicked() {
+                            chosen = Some(*t);
+                        }
+                    }
+                });
+        }
+        if let Some(t) = chosen {
+            let _ = sess.tx.send(Cmd::Choose(t));
+            sess.pending = None;
+            sess.selected = Some(t);
+            if sess.follow {
+                sess.center_on = Some(t);
+            }
+            let title = sess.meta[t].title.clone();
+            sess.logln(format!("↪ cabang dipilih: {title}"), rgb(0xeab308));
+        }
+
         // ---- canvas ----
         egui::CentralPanel::default().show(ctx, |ui| {
             let (resp, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
@@ -1050,7 +1184,12 @@ impl App {
                 sess.hitboxes.push((sn.step, r));
                 let st = sess.states[sn.step];
                 let role = sess.meta[sn.step].role;
-                let fill = Self::state_color(st, role);
+                let mut fill = Self::state_color(st, role);
+                // Jalur selesai → node yang TAK dilalui diredupkan.
+                let dimmed = sess.finished && st == NodeState::Idle;
+                if dimmed {
+                    fill = fill.gamma_multiply(0.35);
+                }
                 let sel = sess.selected == Some(sn.step);
                 painter.rect_filled(r, egui::Rounding::same(6.0), fill);
 
@@ -1072,7 +1211,10 @@ impl App {
                 // Label wrap 2 baris (tak lagi terpotong "…" agresif).
                 if size.x > 34.0 {
                     let font = egui::FontId::proportional((11.0 * zoom).clamp(9.0, 20.0));
-                    let txt_col = if matches!(st, NodeState::Idle | NodeState::Current) { rgb(0xffffff) } else { rgb(0x0b1220) };
+                    let mut txt_col = if matches!(st, NodeState::Idle | NodeState::Current) { rgb(0xffffff) } else { rgb(0x0b1220) };
+                    if dimmed {
+                        txt_col = txt_col.gamma_multiply(0.5);
+                    }
                     let mut job = egui::text::LayoutJob::simple(sn.label.clone(), font, txt_col, size.x - 12.0);
                     job.wrap.max_rows = 2;
                     job.wrap.overflow_character = Some('…');

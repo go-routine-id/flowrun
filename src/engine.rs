@@ -146,6 +146,53 @@ pub fn eval_skip_if(expr: &str, vars: &BTreeMap<String, String>) -> Result<bool>
     })
 }
 
+/// Hasil pemilihan edge berikutnya pada graf bercabang.
+#[derive(Debug, PartialEq)]
+pub enum Next {
+    /// Lanjut ke langkah indeks ini.
+    Advance(usize),
+    /// Tidak ada outgoing edge — jalur selesai.
+    End,
+    /// Ambigu (0 atau >1 kandidat) — mode interaktif bertanya ke user;
+    /// mode auto harus gagal deterministik. (target, label-tampilan).
+    Pick(Vec<(usize, String)>),
+}
+
+/// Pilih edge berikutnya dari daftar outgoing `edges` (lihat `Flow::outgoing`)
+/// berdasar context vars. Aturan: kondisi (`var == nilai`/`!=`) dievaluasi;
+/// tepat SATU true → ikuti. Nol true → fallback (`else`/tanpa label) bila
+/// tepat satu. Selain itu → `Pick` (ambigu).
+pub fn choose_next(edges: &[&crate::flow::FlowEdge], vars: &BTreeMap<String, String>) -> Result<Next> {
+    if edges.is_empty() {
+        return Ok(Next::End);
+    }
+    if edges.len() == 1 && edges[0].cond.is_none() {
+        return Ok(Next::Advance(edges[0].to));
+    }
+    let mut matched: Vec<usize> = Vec::new();
+    let mut fallbacks: Vec<usize> = Vec::new();
+    for e in edges {
+        match &e.cond {
+            Some(expr) => {
+                if eval_skip_if(expr, vars)? {
+                    matched.push(e.to);
+                }
+            }
+            None => fallbacks.push(e.to),
+        }
+    }
+    match (matched.as_slice(), fallbacks.as_slice()) {
+        ([one], _) => Ok(Next::Advance(*one)),
+        ([], [one]) => Ok(Next::Advance(*one)),
+        _ => Ok(Next::Pick(
+            edges
+                .iter()
+                .map(|e| (e.to, e.label.clone().unwrap_or_else(|| "(tanpa syarat)".into())))
+                .collect(),
+        )),
+    }
+}
+
 /// Cocokkan pola status: `2xx` (kelas) atau angka persis (`200`).
 fn status_matches(pattern: &str, status: u16) -> bool {
     let p = pattern.trim();
@@ -290,6 +337,33 @@ mod tests {
         assert!(status_matches("2xx", 201));
         assert!(!status_matches("2xx", 404));
         assert!(status_matches("409", 409));
+    }
+
+    #[test]
+    fn choose_next_rules() {
+        use crate::flow::FlowEdge;
+        let e = |to: usize, cond: Option<&str>| FlowEdge {
+            from: 0,
+            to,
+            cond: cond.map(str::to_string),
+            label: cond.map(str::to_string),
+        };
+        let v = vars(&[("pay_mode", "cod")]);
+        // Tanpa edge → End.
+        assert_eq!(choose_next(&[], &v).unwrap(), Next::End);
+        // Satu edge tanpa syarat → Advance.
+        let a = e(1, None);
+        assert_eq!(choose_next(&[&a], &v).unwrap(), Next::Advance(1));
+        // Kondisi cocok menang atas fallback.
+        let c1 = e(2, Some("pay_mode == cod"));
+        let c2 = e(3, None);
+        assert_eq!(choose_next(&[&c1, &c2], &v).unwrap(), Next::Advance(2));
+        // Tak ada yang cocok → fallback tunggal.
+        let c3 = e(4, Some("pay_mode == digital"));
+        assert_eq!(choose_next(&[&c3, &c2], &v).unwrap(), Next::Advance(3));
+        // Tak ada cocok & tak ada fallback → Pick (ambigu).
+        let c4 = e(5, Some("pay_mode == transfer"));
+        assert!(matches!(choose_next(&[&c3, &c4], &v).unwrap(), Next::Pick(_)));
     }
 
     /// Server HTTP mock 1-request (std, tanpa dependency test tambahan).
