@@ -1208,19 +1208,30 @@ impl App {
                     painter.circle_filled(r.min + egui::vec2(7.0, 7.0), (3.5 * zoom).clamp(2.5, 5.0), role_color(role));
                 }
 
-                // Label wrap 2 baris (tak lagi terpotong "…" agresif).
-                if size.x > 34.0 {
-                    let font = egui::FontId::proportional((11.0 * zoom).clamp(9.0, 20.0));
+                // Label: font mengikuti zoom PENUH (tanpa floor) supaya selalu
+                // muat di kotak; zoom jauh → label disembunyikan (baca via
+                // inspector / zoom-in), bukan luber keluar kotak.
+                let font_px = 11.0 * zoom;
+                if font_px >= 6.5 {
+                    let font = egui::FontId::proportional(font_px.min(20.0));
                     let mut txt_col = if matches!(st, NodeState::Idle | NodeState::Current) { rgb(0xffffff) } else { rgb(0x0b1220) };
                     if dimmed {
                         txt_col = txt_col.gamma_multiply(0.5);
                     }
-                    let mut job = egui::text::LayoutJob::simple(sn.label.clone(), font, txt_col, size.x - 12.0);
-                    job.wrap.max_rows = 2;
-                    job.wrap.overflow_character = Some('…');
-                    job.halign = egui::Align::Center;
-                    let galley = painter.layout_job(job);
-                    painter.galley(egui::pos2(c.x, c.y - galley.size().y / 2.0), galley, txt_col);
+                    let make = |rows: usize| {
+                        let mut job = egui::text::LayoutJob::simple(sn.label.clone(), font.clone(), txt_col, size.x - 10.0);
+                        job.wrap.max_rows = rows;
+                        job.wrap.overflow_character = Some('…');
+                        job.halign = egui::Align::Center;
+                        painter.layout_job(job)
+                    };
+                    let mut galley = make(2);
+                    if galley.size().y > size.y - 3.0 {
+                        galley = make(1); // fit-check: turunkan ke 1 baris
+                    }
+                    if galley.size().y <= size.y - 1.0 {
+                        painter.galley(egui::pos2(c.x, c.y - galley.size().y / 2.0), galley, txt_col);
+                    }
                 }
             }
 
