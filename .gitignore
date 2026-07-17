@@ -4,3 +4,4 @@ flow.svg
 dev.yaml
 *.local.yaml
 env.yaml
+status.svg
