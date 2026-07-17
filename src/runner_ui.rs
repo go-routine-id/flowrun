@@ -105,6 +105,9 @@ pub fn print_report(rep: &StepReport) {
     if let Some(line) = &rep.request_line {
         println!("   \u{2192} {line}");
     }
+    if let Some(a) = &rep.auth_info {
+        println!("   \u{1f511} auth    : {a}");
+    }
     if let Some(b) = &rep.request_body {
         println!("   \u{21e2} payload : {}", compact(b, 600));
     }

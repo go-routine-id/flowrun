@@ -16,6 +16,9 @@ pub struct Ctx {
     /// profil auth → bearer token.
     pub tokens: BTreeMap<String, String>,
     pub vars: BTreeMap<String, String>,
+    /// Opt-in eksplisit (--reveal-tokens): curl memuat token asli, BUKAN
+    /// placeholder ${TOKEN_*}. Default false — log aman dibagikan.
+    pub reveal_tokens: bool,
 }
 
 impl Ctx {
@@ -35,6 +38,7 @@ impl Ctx {
             base_url: env.base_url.trim_end_matches('/').to_string(),
             tokens: env.tokens,
             vars,
+            reveal_tokens: false,
         }
     }
 }
@@ -62,8 +66,11 @@ pub struct StepReport {
     /// Payload JSON yang benar-benar dikirim (setelah templating).
     pub request_body: Option<Value>,
     /// Perintah curl siap-copy; token disamarkan `${TOKEN_<PROFIL>}` agar
-    /// aman tampil di log/screenshot.
+    /// aman tampil di log/screenshot (buka dengan --reveal-tokens).
     pub curl: Option<String>,
+    /// Identitas auth yang dipakai langkah ini: profil + klaim JWT terdekode
+    /// (sub/org/exp) — identitas terlihat, rahasianya tidak.
+    pub auth_info: Option<String>,
 }
 
 impl StepReport {
@@ -77,6 +84,7 @@ impl StepReport {
             request_line: None,
             request_body: None,
             curl: None,
+            auth_info: None,
         }
     }
     fn manual() -> Self {
@@ -89,6 +97,7 @@ impl StepReport {
             request_line: None,
             request_body: None,
             curl: None,
+            auth_info: None,
         }
     }
     fn failed(msg: String) -> Self {
@@ -101,6 +110,7 @@ impl StepReport {
             request_line: None,
             request_body: None,
             curl: None,
+            auth_info: None,
         }
     }
 }
@@ -161,6 +171,58 @@ pub fn dot_get<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
         };
     }
     Some(cur)
+}
+
+/// Ringkas identitas token utk log: profil + sub/org/exp dari payload JWT.
+/// HANYA membaca klaim (bagian tengah, base64url) — token tidak dicetak.
+fn describe_token(profile: &str, token: &str) -> String {
+    fn b64url(s: &str) -> Option<Vec<u8>> {
+        const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = Vec::with_capacity(s.len() * 3 / 4);
+        let mut buf = 0u32;
+        let mut bits = 0u32;
+        for c in s.bytes() {
+            let v = T.iter().position(|&t| t == c)? as u32;
+            buf = (buf << 6) | v;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((buf >> bits) as u8);
+            }
+        }
+        Some(out)
+    }
+    let claims = token
+        .split('.')
+        .nth(1)
+        .and_then(b64url)
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let Some(c) = claims else {
+        return format!("{profile} (klaim tak terbaca)");
+    };
+    let short = |v: Option<&Value>| {
+        v.and_then(|x| x.as_str())
+            .map(|s| s.chars().take(8).collect::<String>())
+            .unwrap_or_else(|| "?".into())
+    };
+    let exp = c.get("exp").and_then(|v| v.as_i64()).map(|e| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let d = e - now;
+        if d < 0 {
+            format!("KEDALUWARSA {}m lalu", -d / 60)
+        } else {
+            format!("exp {}m lagi", d / 60)
+        }
+    });
+    format!(
+        "{profile} \u{00b7} sub={}\u{2026} \u{00b7} org={}\u{2026}{}",
+        short(c.get("sub")),
+        short(c.get("org").or(c.get("org_id"))),
+        exp.map(|e| format!(" \u{00b7} {e}")).unwrap_or_default()
+    )
 }
 
 /// Nilai JSON → string var (string tanpa kutip; lainnya serialisasi kompak).
@@ -292,16 +354,22 @@ fn execute(
 
     let mut req = client.request(method.clone(), &url);
     let mut curl = format!("curl -X {method} '{url}'");
+    let mut auth_info: Option<String> = None;
     if let Some(profile) = &cfg.auth {
         let token = ctx
             .tokens
             .get(profile)
             .with_context(|| format!("token profil auth '{profile}' tidak ada di env file"))?;
         req = req.bearer_auth(token);
-        curl.push_str(&format!(
-            " -H \"Authorization: Bearer ${{TOKEN_{}}}\"",
-            profile.to_uppercase()
-        ));
+        if ctx.reveal_tokens {
+            curl.push_str(&format!(" -H \"Authorization: Bearer {token}\""));
+        } else {
+            curl.push_str(&format!(
+                " -H \"Authorization: Bearer ${{TOKEN_{}}}\"",
+                profile.to_uppercase()
+            ));
+        }
+        auth_info = Some(describe_token(profile, token));
     }
     for (k, v) in &cfg.headers {
         let vr = template(v, &ctx.vars)?;
@@ -378,6 +446,7 @@ fn execute(
         request_line: Some(request_line),
         request_body,
         curl: Some(curl),
+        auth_info,
     })
 }
 

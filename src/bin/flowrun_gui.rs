@@ -95,6 +95,7 @@ struct StepResult {
     request_line: Option<String>,
     request_body: Option<serde_json::Value>,
     curl: Option<String>,
+    auth_info: Option<String>,
     notes: Vec<String>,
     body: Option<serde_json::Value>,
     vars: Vec<(String, String)>,
@@ -259,6 +260,7 @@ fn skip_result(idx: usize, ctx: &Ctx) -> StepResult {
         request_line: None,
         request_body: None,
         curl: None,
+        auth_info: None,
         notes: vec![],
         body: None,
         vars: snapshot_vars(ctx),
@@ -285,6 +287,7 @@ fn exec(
             request_line: None,
             request_body: None,
             curl: None,
+            auth_info: None,
             notes: vec![],
             body: None,
             vars: snapshot_vars(ctx),
@@ -308,6 +311,7 @@ fn exec(
         request_line: rep.request_line,
         request_body: rep.request_body,
         curl: rep.curl,
+        auth_info: rep.auth_info,
         notes: rep.notes,
         body: rep.body,
         vars: snapshot_vars(ctx),
@@ -691,6 +695,9 @@ impl Session {
                     let mut line = format!("{sym} {} {}  {}", self.meta[idx].node_id, http, r.msg);
                     if let Some(rl) = &r.request_line {
                         line.push_str(&format!("\n      \u{2192} {rl}"));
+                    }
+                    if let Some(a) = &r.auth_info {
+                        line.push_str(&format!("\n      \u{1f511} auth    : {a}"));
                     }
                     if let Some(b) = &r.request_body {
                         let s = b.to_string();
@@ -1255,6 +1262,14 @@ impl App {
                             ui.colored_label(
                                 rgb(0x94a3b8),
                                 egui::RichText::new(rl.as_str()).monospace().size(11.0),
+                            );
+                        }
+                        if let Some(a) = &r.auth_info {
+                            ui.colored_label(
+                                rgb(0x94a3b8),
+                                egui::RichText::new(format!("\u{1f511} {a}"))
+                                    .monospace()
+                                    .size(11.0),
                             );
                         }
                         ui.horizontal(|ui| {

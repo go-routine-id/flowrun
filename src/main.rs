@@ -50,6 +50,9 @@ enum Cmd {
         /// Preview server mini (mis. 127.0.0.1:8787)
         #[arg(long)]
         serve: Option<String>,
+        /// Tampilkan token ASLI di baris curl (default disamarkan ${TOKEN_*}).
+        #[arg(long)]
+        reveal_tokens: bool,
         /// Override var (bisa berulang): --var kunci=nilai
         #[arg(long = "var", value_parser = parse_kv)]
         vars: Vec<(String, String)>,
@@ -101,6 +104,7 @@ fn real_main() -> Result<bool> {
             auto,
             svg,
             serve,
+            reveal_tokens,
             vars,
             timeout,
         } => {
@@ -122,6 +126,12 @@ fn real_main() -> Result<bool> {
             }
             let target_host = env_cfg.base_url.trim_end_matches('/').to_string();
             let mut ctx = Ctx::build(&flow_cfg, env_cfg, &vars);
+            ctx.reveal_tokens = reveal_tokens;
+            if reveal_tokens {
+                eprintln!(
+                    "\u{26a0} --reveal-tokens AKTIF: curl memuat token asli \u{2014} jangan bagikan log ini."
+                );
+            }
             let parsed = flow::load(&flow, flow_cfg)?;
 
             let shared = serve.as_ref().map(|_| Arc::new(Mutex::new(String::new())));
