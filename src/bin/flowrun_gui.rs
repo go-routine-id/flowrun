@@ -1202,7 +1202,7 @@ impl App {
                         .size(11.0),
                 )
                 .on_hover_text("base_url env — host yang di-hit semua langkah");
-                ui.small("scroll = zoom · drag = geser");
+                ui.small("pinch / \u{2318}+scroll = zoom \u{00b7} scroll = geser \u{00b7} drag = geser \u{00b7} F = fit \u{00b7} \u{2318}0 = 100%");
             });
             ui.add_space(4.0);
         });
@@ -1426,19 +1426,48 @@ impl App {
                     sess.pan = want - egui::vec2(sn.center.x * sess.zoom, sn.center.y * sess.zoom);
                 }
             }
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0
-                && resp.hovered()
-                && let Some(p) = resp.hover_pos()
-            {
-                let old = sess.zoom;
-                sess.zoom = (sess.zoom * (1.0 + scroll * 0.0015)).clamp(0.15, 6.0);
-                let s = (p - rect.min - sess.pan) / old;
-                sess.pan = (p - rect.min) - s * sess.zoom;
+            // ---- navigasi ala Figma ----
+            // pinch trackpad ATAU Cmd/Ctrl+scroll → zoom berlabuh di kursor
+            // (egui melipat keduanya ke zoom_delta dan mengeluarkannya dari
+            // scroll_delta, jadi tidak dobel); scroll dua jari polos → geser
+            // dua sumbu; drag → geser; F = fit; Cmd/Ctrl+0 = 100%.
+            let (zoom_delta, scroll_vec) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
+            if resp.hovered() {
+                if zoom_delta != 1.0
+                    && let Some(p) = resp.hover_pos()
+                {
+                    let old = sess.zoom;
+                    sess.zoom = (sess.zoom * zoom_delta).clamp(0.15, 6.0);
+                    let s = (p - rect.min - sess.pan) / old;
+                    sess.pan = (p - rect.min) - s * sess.zoom;
+                    sess.follow = false;
+                } else if scroll_vec != egui::Vec2::ZERO {
+                    sess.pan += scroll_vec;
+                    sess.follow = false;
+                }
             }
             if resp.dragged() {
                 sess.pan += resp.drag_delta();
                 sess.follow = false;
+            }
+            if !ui.ctx().wants_keyboard_input() {
+                let (fit_key, hundred) = ui.input(|i| {
+                    (
+                        i.key_pressed(egui::Key::F),
+                        i.modifiers.command && i.key_pressed(egui::Key::Num0),
+                    )
+                });
+                if fit_key {
+                    sess.fitted = false; // dipicu ulang blok fit di frame ini/berikut
+                }
+                if hundred {
+                    // 100% berlabuh di tengah viewport.
+                    let c = rect.center() - rect.min;
+                    let s = (c - sess.pan) / sess.zoom;
+                    sess.zoom = 1.0;
+                    sess.pan = c - s;
+                    sess.follow = false;
+                }
             }
             let zoom = sess.zoom;
             let base = rect.min + sess.pan;
