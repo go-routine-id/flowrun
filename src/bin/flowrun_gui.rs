@@ -35,6 +35,9 @@ struct Args {
     env: Option<PathBuf>,
     #[arg(long, default_value_t = 20)]
     timeout: u64,
+    /// Curl di panel node memuat token ASLI (default disamarkan ${TOKEN_*}).
+    #[arg(long)]
+    reveal_tokens: bool,
 }
 
 // ======================= recent files ==========================
@@ -578,6 +581,7 @@ impl Session {
         cfg_path: &Path,
         env: EnvConfig,
         timeout: u64,
+        reveal_tokens: bool,
     ) -> anyhow::Result<Session> {
         let flow_cfg = config::load_flow_config(cfg_path)?;
         for p in &flow_cfg.auth_profiles {
@@ -587,7 +591,8 @@ impl Session {
             }
         }
         let base_url = env.base_url.trim_end_matches('/').to_string();
-        let ctx = Ctx::build(&flow_cfg, env, &[]);
+        let mut ctx = Ctx::build(&flow_cfg, env, &[]);
+        ctx.reveal_tokens = reveal_tokens;
         let parsed = flow::load(flow_path, flow_cfg)?;
         let node_to_step: HashMap<String, usize> = parsed
             .steps
@@ -888,6 +893,7 @@ struct App {
     picker: Picker,
     session: Option<Session>,
     timeout: u64,
+    reveal_tokens: bool,
 }
 
 fn rgb(hex: u32) -> egui::Color32 {
@@ -923,7 +929,13 @@ impl App {
             self.picker.error = Some("pilih flow.mmd dan flow.yaml dulu".into());
             return;
         };
-        match Session::start(&f, &c, self.picker.to_env_config(), self.timeout) {
+        match Session::start(
+            &f,
+            &c,
+            self.picker.to_env_config(),
+            self.timeout,
+            self.reveal_tokens,
+        ) {
             Ok(s) => {
                 push_recent(RecentEntry {
                     flow: f,
@@ -1617,6 +1629,7 @@ fn main() -> anyhow::Result<()> {
         picker: Picker::new(),
         session: None,
         timeout: args.timeout,
+        reveal_tokens: args.reveal_tokens,
     };
 
     // CLI args tetap didukung: langsung mulai bila lengkap.
