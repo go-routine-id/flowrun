@@ -567,6 +567,7 @@ mod tests {
             base_url: base,
             tokens: BTreeMap::new(),
             vars: BTreeMap::new(),
+            reveal_tokens: false,
         };
         let s = step("POST /api/v1/customer/orders", |c| {
             c.capture.insert("order_id".into(), "data.id".into());
@@ -589,6 +590,7 @@ mod tests {
             base_url: base,
             tokens: BTreeMap::new(),
             vars: BTreeMap::new(),
+            reveal_tokens: false,
         };
         let s = step("GET /x", |c| {
             c.assert.insert(
@@ -610,6 +612,7 @@ mod tests {
             base_url: base,
             tokens: BTreeMap::new(),
             vars: BTreeMap::new(),
+            reveal_tokens: false,
         };
         let s = step("GET /x", |_| {});
         let rep = run_step(&s, &mut ctx, &reqwest::blocking::Client::new());
