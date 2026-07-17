@@ -4,13 +4,15 @@ flowchart LR
   n02 --> n03["03 Detail Order (order_list_id)"]:::ownr
   n03 --> n04["04 Terima Order → accepted"]:::ownr
   n04 --> n05["05 Timbang Final per Item"]:::ownr
-  n05 --> n06["06 Harga Final → price_proposed"]:::ownr
+  n05 --> n05v["05b Selesai Verifikasi"]:::ownr
+  n05v --> n06["06 Harga Final → price_proposed"]:::ownr
   n06 --> n07["07 Lihat Harga (poll)"]:::cust
   n07 --> n08["08 Pilih Metode + Charge"]:::cust
   n08 --> n09["09 Setujui Harga → processing"]:::cust
-  n09 --> n10["10 Konfirmasi COD"]:::ownr
-  n10 --> n11["11 Item Selesai → ready_pickup"]:::ownr
-  n11 --> n12["12 Konfirmasi Terima → completed"]:::cust
-  n12 --> n13["13 Timeline (verifikasi)"]:::cust
+  n09 --> n11["10 Item Selesai (baris)"]:::ownr
+  n11 --> nAdv["11 Siap Diambil → ready_pickup"]:::ownr
+  nAdv --> n10["12 Konfirmasi COD (serah-terima)"]:::ownr
+  n10 --> n12["13 Konfirmasi Terima → completed"]:::cust
+  n12 --> n13["14 Timeline (verifikasi)"]:::cust
   classDef cust fill:#3b82f6,stroke:#1d4ed8,color:#fff
   classDef ownr fill:#f59e0b,stroke:#b45309,color:#1a1204

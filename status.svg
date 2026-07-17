@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="4512" height="94" viewBox="0 0 4512 94" font-family="Helvetica, Arial, sans-serif" font-size="14">
+<rect width="4512" height="94" fill="#ffffff"/>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 1 L 9 5 L 0 9 z" fill="#44507a"/></marker></defs>
+<path d="M 195.1 47.0 C 237.1 47.0, 237.1 47.0, 279.1 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<path d="M 464.2 47.0 C 506.2 47.0, 506.2 47.0, 548.2 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<path d="M 717.8 47.0 C 759.8 47.0, 759.8 47.0, 801.8 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<path d="M 1018.5 47.0 C 1060.5 47.0, 1060.5 47.0, 1102.5 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<path d="M 1310.2 47.0 C 1352.2 47.0, 1352.2 47.0, 1394.2 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<path d="M 1593.1 47.0 C 1635.1 47.0, 1635.1 47.0, 1677.1 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<path d="M 1845.3 47.0 C 1887.3 47.0, 1887.3 47.0, 1929.3 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<path d="M 2167.2 47.0 C 2209.2 47.0, 2209.2 47.0, 2251.2 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<path d="M 2412.7 47.0 C 2454.7 47.0, 2454.7 47.0, 2496.7 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<path d="M 2687.8 47.0 C 2729.8 47.0, 2729.8 47.0, 2771.8 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<path d="M 2992.5 47.0 C 3034.5 47.0, 3034.5 47.0, 3076.5 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<path d="M 3250.1 47.0 C 3292.1 47.0, 3292.1 47.0, 3334.1 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<path d="M 3564.7 47.0 C 3606.7 47.0, 3606.7 47.0, 3648.7 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<path d="M 3892.8 47.0 C 3934.8 47.0, 3934.8 47.0, 3976.8 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<path d="M 4225.1 47.0 C 4267.1 47.0, 4267.1 47.0, 4309.1 47.0" fill="none" stroke="#44507a" stroke-width="1.7" marker-end="url(#arrow)"/>
+<rect x="28.0" y="28.0" width="167.1" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="111.5" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">00 List Metode Bayar</text>
+<rect x="279.1" y="28.0" width="185.1" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="371.7" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">01 Buat Order → pending</text>
+<rect x="548.2" y="28.0" width="169.6" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="633.0" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">02 Inbox Order Masuk</text>
+<rect x="801.8" y="28.0" width="216.7" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="910.2" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">03 Detail Order (order_list_id)</text>
+<rect x="1102.5" y="28.0" width="207.7" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="1206.4" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">04 Terima Order → accepted</text>
+<rect x="1394.2" y="28.0" width="198.9" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="1493.7" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">05 Timbang Final per Item</text>
+<rect x="1677.1" y="28.0" width="168.2" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="1761.2" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">05b Selesai Verifikasi</text>
+<rect x="1929.3" y="28.0" width="237.9" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="2048.2" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">06 Harga Final → price_proposed</text>
+<rect x="2251.2" y="28.0" width="161.5" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="2331.9" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">07 Lihat Harga (poll)</text>
+<rect x="2496.7" y="28.0" width="191.1" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="2592.2" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">08 Pilih Metode + Charge</text>
+<rect x="2771.8" y="28.0" width="220.7" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="2882.1" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">09 Setujui Harga → processing</text>
+<rect x="3076.5" y="28.0" width="173.6" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="3163.3" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">10 Item Selesai (baris)</text>
+<rect x="3334.1" y="28.0" width="230.6" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="3449.4" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">11 Siap Diambil → ready_pickup</text>
+<rect x="3648.7" y="28.0" width="244.1" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="3770.8" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">12 Konfirmasi COD (serah-terima)</text>
+<rect x="3976.8" y="28.0" width="248.3" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="4100.9" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">13 Konfirmasi Terima → completed</text>
+<rect x="4309.1" y="28.0" width="175.2" height="38.0" rx="3.0" fill="#22c55e" stroke="#15803d" stroke-width="1.6"/>
+<text x="4396.7" y="47.0" dy="0.33em" text-anchor="middle" fill="#052e12">14 Timeline (verifikasi)</text>
+</svg>

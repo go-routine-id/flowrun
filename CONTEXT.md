@@ -28,9 +28,18 @@ Tiga pemisahan yang DISENGAJA (jangan dicampur lagi):
 | **Percabangan (v0.2)**: kondisi = label edge mermaid (`-->\|pay_mode == cod\|`, `\|else\|` = fallback); GUI modal pilih cabang saat ambigu; `--auto` gagal deterministik; node tak dilalui diredupkan | ✅ |
 | Unit test 15/15 (parser, engine, cabang, mock HTTP via std TcpListener) | ✅ |
 
-**Belum pernah diuji ke backend nyata** — semua demo memakai mock
-(`tools/wacca_mock.py`). Blocker: butuh 2 JWT (customer + owner) environment dev
-WACCA; owner login via Google OAuth sehingga tak bisa diambil otomatis.
+**SUDAH diuji e2e ke backend nyata** (17 Jul 2026): 16/16 langkah hijau
+melawan wacca-service terbaru + DB dev — order COD customer↔owner sampai
+`completed` + timeline. Blocker lama ("owner hanya Google OAuth") KELIRU:
+login password tersedia di account-service (`POST /api/v1/auth/login`) — akun
+demo `mtx_t1_+11963+@yopmail.com` / `mtx_c1_+3756+@yopmail.com` (password
+bersama ala matrixgen, lihat wacca-service `cmd/matrixgen/shared.go`).
+Resep provisioning lengkap: login owner → `POST /register/tenant` (Bearer =
+mode preauth, bila org belum jadi tenant) → buat outlet + item-service +
+service-price → isi `dev.yaml`. Tiga koreksi flow ditemukan saat uji nyata
+(lihat commit): wajib `verify-complete` sebelum final-price; baris selesai
+TIDAK memajukan order (butuh `advance` → ready_pickup); konfirmasi COD hanya
+sah di ready_pickup/delivering/completed.
 Base URL dev WACCA bisa dilihat di `.env.dev` repo wacca-mobile (via VPN internal).
 Catatan 16 Jul 2026 (sesi wacca): (1) kunci JWT account-service dev DIROTASI —
 semua token lama invalid, minta token segar saat mau e2e; (2) path capture

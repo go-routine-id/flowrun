@@ -54,6 +54,12 @@ steps:
     body: { final_quantity: 3.5, actual_pcs: 6, note: "timbang (flowrun)" }
     note: re-run setelah n06 = re-weigh (order mundur, charge abandoned — B1)
 
+  n05v:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/verify-complete
+    body: {}
+    note: wajib sebelum final-price (gate verifikasi owner)
+
   n06:
     auth: owner
     request: POST /api/v1/tenant/orders/{{order_id}}/final-price
@@ -85,6 +91,13 @@ steps:
   n11:
     auth: owner
     request: PATCH /api/v1/tenant/order-list/{{order_list_id}}/status-finished
+
+  nAdv:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/advance
+    body: { target: ready_pickup }
+    assert: { "data.status": ready_pickup }
+    note: baris selesai tidak otomatis memajukan order; owner menandai siap-ambil
 
   n12:
     auth: customer
