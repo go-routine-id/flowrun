@@ -896,6 +896,76 @@ struct App {
     reveal_tokens: bool,
 }
 
+/// Latar kanvas premium ala design-tool: gradien vertikal halus, dot-grid
+/// yang ikut pan/zoom dengan LOD (menjarang saat zoom-out, titik mayor tiap
+/// 4 langkah), dan vignette tipis di tepi supaya fokus jatuh ke tengah.
+fn draw_premium_bg(painter: &egui::Painter, rect: egui::Rect, pan: egui::Vec2, zoom: f32) {
+    // 1) gradien dasar (atas sedikit lebih terang → bawah lebih pekat).
+    let c_top = egui::Color32::from_rgb(0x1b, 0x1e, 0x28);
+    let c_bot = egui::Color32::from_rgb(0x0f, 0x11, 0x16);
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), c_top);
+    mesh.colored_vertex(rect.right_top(), c_top);
+    mesh.colored_vertex(rect.right_bottom(), c_bot);
+    mesh.colored_vertex(rect.left_bottom(), c_bot);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
+
+    // 2) dot-grid dunia (bergerak bersama pan, berskala bersama zoom).
+    //    LOD: jaga jarak layar antar titik di 24..96 px dengan kelipatan 2,
+    //    lalu alpha di-fade mengikuti kepadatan supaya transisi LOD mulus.
+    let mut step = 32.0f32;
+    while step * zoom < 24.0 {
+        step *= 2.0;
+    }
+    while step * zoom > 96.0 {
+        step /= 2.0;
+    }
+    let sp = step * zoom;
+    let t = ((sp - 24.0) / 72.0).clamp(0.0, 1.0);
+    let minor_a = (10.0 + t * 16.0) as u8;
+    let major_a = (26.0 + t * 26.0) as u8;
+    let origin = rect.min + pan; // titik dunia (0,0) di layar
+    let i0 = ((rect.min.x - origin.x) / sp).floor() as i64;
+    let i1 = ((rect.max.x - origin.x) / sp).ceil() as i64;
+    let j0 = ((rect.min.y - origin.y) / sp).floor() as i64;
+    let j1 = ((rect.max.y - origin.y) / sp).ceil() as i64;
+    if (i1 - i0 + 1) * (j1 - j0 + 1) <= 12_000 {
+        let minor = egui::Color32::from_rgba_unmultiplied(0x94, 0xa3, 0xb8, minor_a);
+        let major = egui::Color32::from_rgba_unmultiplied(0xb6, 0xc2, 0xd4, major_a);
+        for i in i0..=i1 {
+            for j in j0..=j1 {
+                let pos = origin + egui::vec2(i as f32 * sp, j as f32 * sp);
+                if i.rem_euclid(4) == 0 && j.rem_euclid(4) == 0 {
+                    painter.circle_filled(pos, 1.7, major);
+                } else {
+                    painter.circle_filled(pos, 1.1, minor);
+                }
+            }
+        }
+    }
+
+    // 3) vignette tipis: strip gradasi gelap di keempat tepi.
+    let v = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 64);
+    let clear = egui::Color32::TRANSPARENT;
+    let d = 90.0f32.min(rect.height() / 4.0);
+    let strips = [
+        (rect.left_top(), rect.right_top(), egui::vec2(0.0, d)), // atas
+        (rect.left_bottom(), rect.right_bottom(), egui::vec2(0.0, -d)), // bawah
+    ];
+    for (a, b, dir) in strips {
+        let mut m = egui::Mesh::default();
+        m.colored_vertex(a, v);
+        m.colored_vertex(b, v);
+        m.colored_vertex(b + dir, clear);
+        m.colored_vertex(a + dir, clear);
+        m.add_triangle(0, 1, 2);
+        m.add_triangle(0, 2, 3);
+        painter.add(egui::Shape::mesh(m));
+    }
+}
+
 fn rgb(hex: u32) -> egui::Color32 {
     egui::Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
@@ -1469,6 +1539,7 @@ impl App {
                     sess.follow = false;
                 }
             }
+            draw_premium_bg(&painter, rect, sess.pan, sess.zoom);
             let zoom = sess.zoom;
             let base = rect.min + sess.pan;
             let tf = |p: egui::Pos2| base + egui::vec2(p.x * zoom, p.y * zoom);
