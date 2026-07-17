@@ -970,6 +970,71 @@ fn rgb(hex: u32) -> egui::Color32 {
     egui::Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
 
+/// Chip kecil membulat (badge) — bahan dasar panel premium.
+fn pill(ui: &mut egui::Ui, text: &str, bg: egui::Color32, fg: egui::Color32, mono: bool) {
+    egui::Frame::default()
+        .fill(bg)
+        .rounding(egui::Rounding::same(999.0))
+        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+        .show(ui, |ui| {
+            let mut t = egui::RichText::new(text).color(fg).size(11.0);
+            if mono {
+                t = t.monospace();
+            }
+            ui.label(t);
+        });
+}
+
+/// Warna badge HTTP method ala API client (Postman/Insomnia).
+fn method_color(m: &str) -> egui::Color32 {
+    match m {
+        "GET" => rgb(0x10b981),
+        "POST" => rgb(0xf59e0b),
+        "PUT" => rgb(0x38bdf8),
+        "PATCH" => rgb(0xa78bfa),
+        "DELETE" => rgb(0xef4444),
+        _ => rgb(0x64748b),
+    }
+}
+
+fn state_color(s: NodeState) -> egui::Color32 {
+    match s {
+        NodeState::Ok => rgb(0x22c55e),
+        NodeState::Fail => rgb(0xef4444),
+        NodeState::Skip => rgb(0x94a3b8),
+        NodeState::Manual => rgb(0xa78bfa),
+        NodeState::Current => rgb(0x3b82f6),
+        NodeState::Idle => rgb(0x475569),
+    }
+}
+
+/// Kartu panel: frame gelap membulat ber-stroke halus.
+fn card<R>(ui: &mut egui::Ui, f: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::default()
+        .fill(rgb(0x1a1f2d))
+        .stroke(egui::Stroke::new(1.0, rgb(0x272e40)))
+        .rounding(egui::Rounding::same(10.0))
+        .inner_margin(egui::Margin::same(12.0))
+        .outer_margin(egui::Margin::symmetric(0.0, 4.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            f(ui)
+        })
+        .inner
+}
+
+/// Label section kecil huruf kapital — pemisah premium antar blok.
+fn section_label(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new(text.to_uppercase())
+            .size(10.0)
+            .color(rgb(0x64748b))
+            .strong(),
+    );
+    ui.add_space(2.0);
+}
+
 fn role_color(r: Role) -> egui::Color32 {
     match r {
         Role::Customer => rgb(0x3b82f6),
@@ -1307,126 +1372,274 @@ impl App {
         egui::SidePanel::right("inspector")
             .resizable(true)
             .default_width(380.0)
+            .frame(
+                egui::Frame::default()
+                    .fill(rgb(0x12151f))
+                    .inner_margin(egui::Margin::same(12.0)),
+            )
             .show(ctx, |ui| {
-                if let Some(i) = sess.selected {
-                    let m = sess.meta[i].clone();
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        let rc = role_color(m.role);
-                        let (r, _) =
-                            ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                        ui.painter().circle_filled(r.center(), 5.0, rc);
-                        ui.heading(&m.title);
-                    });
-                    ui.label(format!(
-                        "{} · {}",
-                        m.node_id,
-                        match m.role {
-                            Role::Customer => "Customer",
-                            Role::Owner => "Owner",
-                            Role::Neutral => "-",
-                        }
-                    ));
-                    ui.monospace(&m.endpoint);
-                    if let Some(n) = &m.note {
-                        ui.colored_label(rgb(0x9ca3af), format!("📝 {n}"));
-                    }
-                    if ui
-                        .button("⟳ Hit node ini")
-                        .on_hover_text("jalankan ulang node ini sekarang (tanpa memajukan urutan)")
-                        .clicked()
-                    {
-                        let _ = sess.tx.send(Cmd::RunAt(i));
-                    }
-                    ui.separator();
-                    if let Some(r) = &sess.results[i] {
-                        if let Some(rl) = &r.request_line {
-                            ui.colored_label(
-                                rgb(0x94a3b8),
-                                egui::RichText::new(rl.as_str()).monospace().size(11.0),
-                            );
-                        }
-                        if let Some(a) = &r.auth_info {
-                            ui.colored_label(
-                                rgb(0x94a3b8),
-                                egui::RichText::new(format!("\u{1f511} {a}"))
-                                    .monospace()
-                                    .size(11.0),
-                            );
-                        }
-                        ui.horizontal(|ui| {
-                            if let Some(c) = &r.curl
-                                && ui
-                                    .small_button("\u{1F4CB} curl")
-                                    .on_hover_text("copy curl \u{2014} token disamarkan ${TOKEN_*}")
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if let Some(i) = sess.selected {
+                        let m = sess.meta[i].clone();
+                        let st = sess.states[i];
+
+                        // ── kartu header: status + judul + chips ──
+                        card(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let (r, _) = ui.allocate_exact_size(
+                                    egui::vec2(12.0, 12.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(r.center(), 5.0, state_color(st));
+                                ui.painter().circle_stroke(
+                                    r.center(),
+                                    5.5,
+                                    egui::Stroke::new(1.0, state_color(st).gamma_multiply(0.4)),
+                                );
+                                ui.label(egui::RichText::new(&m.title).size(15.0).strong());
+                            });
+                            ui.add_space(6.0);
+                            ui.horizontal_wrapped(|ui| {
+                                pill(ui, &m.node_id, rgb(0x232a3b), rgb(0x94a3b8), true);
+                                match m.role {
+                                    Role::Customer => pill(
+                                        ui,
+                                        "Customer",
+                                        egui::Color32::from_rgba_unmultiplied(0x3b, 0x82, 0xf6, 38),
+                                        rgb(0x7fb3ff),
+                                        false,
+                                    ),
+                                    Role::Owner => pill(
+                                        ui,
+                                        "Owner",
+                                        egui::Color32::from_rgba_unmultiplied(0xf5, 0x9e, 0x0b, 38),
+                                        rgb(0xfacc6b),
+                                        false,
+                                    ),
+                                    Role::Neutral => {
+                                        pill(ui, "eksternal", rgb(0x232a3b), rgb(0x94a3b8), false)
+                                    }
+                                }
+                                let (stxt, scol) = match st {
+                                    NodeState::Ok => ("selesai", rgb(0x22c55e)),
+                                    NodeState::Fail => ("gagal", rgb(0xef4444)),
+                                    NodeState::Skip => ("dilewati", rgb(0x94a3b8)),
+                                    NodeState::Manual => ("manual", rgb(0xa78bfa)),
+                                    NodeState::Current => ("berjalan", rgb(0x3b82f6)),
+                                    NodeState::Idle => ("antre", rgb(0x64748b)),
+                                };
+                                pill(ui, stxt, scol.gamma_multiply(0.16), scol, false);
+                            });
+                        });
+
+                        // ── kartu request: badge method + path + aksi ──
+                        card(ui, |ui| {
+                            let (method, path) = m
+                                .endpoint
+                                .split_once(' ')
+                                .unwrap_or(("", m.endpoint.as_str()));
+                            ui.horizontal_wrapped(|ui| {
+                                if !method.is_empty() {
+                                    pill(
+                                        ui,
+                                        method,
+                                        method_color(method).gamma_multiply(0.2),
+                                        method_color(method),
+                                        true,
+                                    );
+                                }
+                                ui.label(
+                                    egui::RichText::new(path)
+                                        .monospace()
+                                        .size(12.0)
+                                        .color(rgb(0xcbd5e1)),
+                                );
+                            });
+                            if let Some(n) = &m.note {
+                                ui.add_space(6.0);
+                                ui.label(
+                                    egui::RichText::new(format!("\u{1f4dd} {n}"))
+                                        .size(11.0)
+                                        .color(rgb(0x8b93a7))
+                                        .italics(),
+                                );
+                            }
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                let hit = egui::Button::new(
+                                    egui::RichText::new("\u{27f3}  Hit node ini")
+                                        .color(egui::Color32::WHITE)
+                                        .size(12.0),
+                                )
+                                .fill(rgb(0x4f46e5))
+                                .rounding(egui::Rounding::same(8.0));
+                                if ui
+                                    .add(hit)
+                                    .on_hover_text(
+                                        "jalankan ulang node ini sekarang (tanpa memajukan urutan)",
+                                    )
                                     .clicked()
-                            {
-                                ui.output_mut(|o| o.copied_text = c.clone());
-                            }
-                            if let Some(b) = &r.request_body
-                                && ui.small_button("\u{1F4CB} payload").clicked()
-                            {
-                                ui.output_mut(|o| {
-                                    o.copied_text =
-                                        serde_json::to_string_pretty(b).unwrap_or_default()
+                                {
+                                    let _ = sess.tx.send(Cmd::RunAt(i));
+                                }
+                                if let Some(r) = &sess.results[i] {
+                                    if let Some(c) = &r.curl
+                                        && ui
+                                            .small_button("\u{1F4CB} curl")
+                                            .on_hover_text("copy perintah curl")
+                                            .clicked()
+                                    {
+                                        ui.output_mut(|o| o.copied_text = c.clone());
+                                    }
+                                    if let Some(b) = &r.request_body
+                                        && ui.small_button("\u{1F4CB} payload").clicked()
+                                    {
+                                        ui.output_mut(|o| {
+                                            o.copied_text =
+                                                serde_json::to_string_pretty(b).unwrap_or_default()
+                                        });
+                                    }
+                                }
+                            });
+                        });
+
+                        // ── hasil eksekusi ──
+                        if let Some(r) = &sess.results[i] {
+                            section_label(ui, "hasil");
+                            card(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    let (scol, stext) = match r.status {
+                                        Some(c) if c >= 500 => (rgb(0xef4444), format!("HTTP {c}")),
+                                        Some(c) if c >= 400 => (rgb(0xf59e0b), format!("HTTP {c}")),
+                                        Some(c) => (rgb(0x22c55e), format!("HTTP {c}")),
+                                        None => (rgb(0x94a3b8), "\u{2014}".into()),
+                                    };
+                                    pill(ui, &stext, scol.gamma_multiply(0.18), scol, true);
+                                    pill(
+                                        ui,
+                                        &format!("{} ms", r.ms),
+                                        rgb(0x232a3b),
+                                        rgb(0x94a3b8),
+                                        true,
+                                    );
+                                });
+                                if let Some(rl) = &r.request_line {
+                                    ui.add_space(6.0);
+                                    ui.label(
+                                        egui::RichText::new(rl.as_str())
+                                            .monospace()
+                                            .size(10.5)
+                                            .color(rgb(0x7c8598)),
+                                    );
+                                }
+                                if let Some(a) = &r.auth_info {
+                                    ui.label(
+                                        egui::RichText::new(format!("\u{1f511} {a}"))
+                                            .monospace()
+                                            .size(10.5)
+                                            .color(rgb(0x7c8598)),
+                                    );
+                                }
+                                if !r.msg.is_empty() {
+                                    ui.add_space(6.0);
+                                    ui.colored_label(
+                                        if r.state == NodeState::Fail {
+                                            rgb(0xf87171)
+                                        } else {
+                                            rgb(0x9ca3af)
+                                        },
+                                        &r.msg,
+                                    );
+                                }
+                                for n in &r.notes {
+                                    ui.label(
+                                        egui::RichText::new(n).size(11.0).color(rgb(0x8b93a7)),
+                                    );
+                                }
+                            });
+
+                            if let Some(body) = &r.body {
+                                section_label(ui, "response");
+                                card(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("\u{1F4CB} copy JSON").clicked() {
+                                            let pretty = serde_json::to_string_pretty(body)
+                                                .unwrap_or_default();
+                                            ui.output_mut(|o| o.copied_text = pretty);
+                                        }
+                                    });
+                                    egui::ScrollArea::vertical()
+                                        .max_height(300.0)
+                                        .show(ui, |ui| {
+                                            json_tree(ui, &format!("resp{i}"), "response", body);
+                                        });
                                 });
                             }
-                        });
-                        let col = match r.status {
-                            Some(c) if c >= 500 => rgb(0xef4444),
-                            Some(c) if c >= 400 => rgb(0xf59e0b),
-                            Some(_) => rgb(0x22c55e),
-                            None => rgb(0x9ca3af),
-                        };
-                        ui.horizontal(|ui| {
-                            ui.label("HTTP");
-                            ui.colored_label(
-                                col,
-                                r.status.map(|c| c.to_string()).unwrap_or("-".into()),
-                            );
-                            ui.label(format!("· {} ms", r.ms));
-                            if r.body.is_some() && ui.small_button("📋 copy").clicked() {
-                                let pretty = r
-                                    .body
-                                    .as_ref()
-                                    .map(|b| serde_json::to_string_pretty(b).unwrap_or_default())
-                                    .unwrap_or_default();
-                                ui.output_mut(|o| o.copied_text = pretty);
-                            }
-                        });
-                        if !r.msg.is_empty() {
-                            ui.colored_label(
-                                if r.state == NodeState::Fail {
-                                    rgb(0xef4444)
-                                } else {
-                                    rgb(0x9ca3af)
-                                },
-                                &r.msg,
-                            );
-                        }
-                        for n in &r.notes {
-                            ui.small(n);
-                        }
-                        if let Some(body) = &r.body {
-                            ui.separator();
-                            egui::ScrollArea::vertical()
-                                .max_height(320.0)
-                                .show(ui, |ui| {
-                                    json_tree(ui, &format!("resp{i}"), "response", body);
+                        } else {
+                            card(ui, |ui| {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(10.0);
+                                    ui.label(
+                                        egui::RichText::new("\u{25c7}")
+                                            .size(22.0)
+                                            .color(rgb(0x3a4258)),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new("belum dijalankan")
+                                            .color(rgb(0x8b93a7)),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "tekan  \u{25b6} Next  atau  \u{27f3} Hit node ini",
+                                        )
+                                        .size(11.0)
+                                        .color(rgb(0x5b6377)),
+                                    );
+                                    ui.add_space(10.0);
                                 });
+                            });
                         }
                     } else {
-                        ui.colored_label(rgb(0x9ca3af), "belum dijalankan");
+                        card(ui, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(14.0);
+                                ui.label(egui::RichText::new("\u{1f446}").size(20.0));
+                                ui.label(
+                                    egui::RichText::new("klik node untuk inspeksi")
+                                        .color(rgb(0x8b93a7)),
+                                );
+                                ui.add_space(14.0);
+                            });
+                        });
                     }
-                } else {
-                    ui.add_space(6.0);
-                    ui.colored_label(rgb(0x9ca3af), "klik node untuk inspeksi");
-                }
-                ui.separator();
-                ui.collapsing("context vars", |ui| {
-                    for (k, v) in &sess.vars {
-                        ui.small(format!("{k} = {v}"));
-                    }
+
+                    section_label(ui, &format!("context vars ({})", sess.vars.len()));
+                    card(ui, |ui| {
+                        if sess.vars.is_empty() {
+                            ui.label(
+                                egui::RichText::new("kosong — terisi lewat capture")
+                                    .size(11.0)
+                                    .color(rgb(0x5b6377)),
+                            );
+                        }
+                        for (k, v) in &sess.vars {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    egui::RichText::new(k)
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(rgb(0x7fb3ff)),
+                                );
+                                ui.label(egui::RichText::new("=").size(11.0).color(rgb(0x5b6377)));
+                                ui.label(
+                                    egui::RichText::new(v)
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(rgb(0xcbd5e1)),
+                                );
+                            });
+                        }
+                    });
                 });
             });
 
