@@ -64,7 +64,7 @@ pub fn write_svg(path: &Path, svg: &str) -> Result<()> {
 
 /// Preview server mini (viewer saja, bukan UI kontrol): `/` = halaman
 /// auto-refresh, `/flow.svg` = SVG terkini dari memori.
-pub fn serve_preview(addr: &str, svg: Arc<Mutex<String>>) -> Result<()> {
+pub fn serve_preview(addr: &str, svg: Arc<Mutex<String>>, target: String) -> Result<()> {
     let listener = TcpListener::bind(addr).with_context(|| format!("bind {addr}"))?;
     let shown = listener.local_addr()?;
     eprintln!("🔎 preview: http://{shown} (auto-refresh 1 dtk)");
@@ -75,14 +75,19 @@ pub fn serve_preview(addr: &str, svg: Arc<Mutex<String>>) -> Result<()> {
             let _ = sock.read(&mut buf);
             let first = String::from_utf8_lossy(&buf);
             let (ctype, body) = if first.starts_with("GET /flow.svg") {
-                ("image/svg+xml", svg.lock().map(|s| s.clone()).unwrap_or_default())
+                (
+                    "image/svg+xml",
+                    svg.lock().map(|s| s.clone()).unwrap_or_default(),
+                )
             } else {
                 (
                     "text/html; charset=utf-8",
-                    "<!doctype html><meta http-equiv=refresh content=1>\
-                     <body style=\"background:#14161b;margin:24px\">\
-                     <img src=/flow.svg style=\"max-width:100%\"></body>"
-                        .to_string(),
+                    format!(
+                        "<!doctype html><meta http-equiv=refresh content=1>\
+                         <body style=\"background:#14161b;margin:24px;font-family:ui-monospace,monospace\">\
+                         <div style=\"color:#94a3b8;margin-bottom:10px\">\u{1F3AF} target: <b style=\"color:#e2e8f0\">{target}</b></div>\
+                         <img src=/flow.svg style=\"max-width:100%\"></body>"
+                    ),
                 )
             };
             let resp = format!(
@@ -102,7 +107,10 @@ mod tests {
     #[test]
     fn overlay_appends_classes_and_renders() {
         let src = "flowchart LR\n  a[Satu]:::cust --> b[Dua]\n  classDef cust fill:#3b82f6\n";
-        let states = vec![("a".to_string(), NodeState::Ok), ("b".to_string(), NodeState::Current)];
+        let states = vec![
+            ("a".to_string(), NodeState::Ok),
+            ("b".to_string(), NodeState::Current),
+        ];
         let mmd = mermaid_with_status(src, &states);
         assert!(mmd.contains("class a frOk"));
         assert!(mmd.contains("class b frCur"));

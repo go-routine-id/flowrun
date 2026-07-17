@@ -5,10 +5,10 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::config::{yaml_to_var_string, EnvConfig, FlowConfig};
+use crate::config::{EnvConfig, FlowConfig, yaml_to_var_string};
 use crate::flow::FlowStep;
 
 pub struct Ctx {
@@ -31,7 +31,11 @@ impl Ctx {
         for (k, v) in cli_vars {
             vars.insert(k.clone(), v.clone());
         }
-        Ctx { base_url: env.base_url.trim_end_matches('/').to_string(), tokens: env.tokens, vars }
+        Ctx {
+            base_url: env.base_url.trim_end_matches('/').to_string(),
+            tokens: env.tokens,
+            vars,
+        }
     }
 }
 
@@ -52,17 +56,41 @@ pub struct StepReport {
     pub body: Option<Value>,
     /// Catatan capture/assert untuk ditampilkan UI.
     pub notes: Vec<String>,
+    /// `METHOD url-lengkap` yang benar-benar di-hit (setelah templating) —
+    /// supaya target host selalu terlihat di CLI/GUI/preview.
+    pub request_line: Option<String>,
 }
 
 impl StepReport {
     fn skipped(reason: String) -> Self {
-        StepReport { outcome: Outcome::Skipped(reason), http_status: None, ms: 0, body: None, notes: vec![] }
+        StepReport {
+            outcome: Outcome::Skipped(reason),
+            http_status: None,
+            ms: 0,
+            body: None,
+            notes: vec![],
+            request_line: None,
+        }
     }
     fn manual() -> Self {
-        StepReport { outcome: Outcome::Manual, http_status: None, ms: 0, body: None, notes: vec![] }
+        StepReport {
+            outcome: Outcome::Manual,
+            http_status: None,
+            ms: 0,
+            body: None,
+            notes: vec![],
+            request_line: None,
+        }
     }
     fn failed(msg: String) -> Self {
-        StepReport { outcome: Outcome::Failed(msg), http_status: None, ms: 0, body: None, notes: vec![] }
+        StepReport {
+            outcome: Outcome::Failed(msg),
+            http_status: None,
+            ms: 0,
+            body: None,
+            notes: vec![],
+            request_line: None,
+        }
     }
 }
 
@@ -97,7 +125,11 @@ pub fn template(input: &str, vars: &BTreeMap<String, String>) -> Result<String> 
 fn template_json(v: &Value, vars: &BTreeMap<String, String>) -> Result<Value> {
     Ok(match v {
         Value::String(s) => Value::String(template(s, vars)?),
-        Value::Array(a) => Value::Array(a.iter().map(|x| template_json(x, vars)).collect::<Result<_>>()?),
+        Value::Array(a) => Value::Array(
+            a.iter()
+                .map(|x| template_json(x, vars))
+                .collect::<Result<_>>()?,
+        ),
         Value::Object(o) => Value::Object(
             o.iter()
                 .map(|(k, x)| Ok((k.clone(), template_json(x, vars)?)))
@@ -162,7 +194,10 @@ pub enum Next {
 /// berdasar context vars. Aturan: kondisi (`var == nilai`/`!=`) dievaluasi;
 /// tepat SATU true → ikuti. Nol true → fallback (`else`/tanpa label) bila
 /// tepat satu. Selain itu → `Pick` (ambigu).
-pub fn choose_next(edges: &[&crate::flow::FlowEdge], vars: &BTreeMap<String, String>) -> Result<Next> {
+pub fn choose_next(
+    edges: &[&crate::flow::FlowEdge],
+    vars: &BTreeMap<String, String>,
+) -> Result<Next> {
     if edges.is_empty() {
         return Ok(Next::End);
     }
@@ -187,7 +222,12 @@ pub fn choose_next(edges: &[&crate::flow::FlowEdge], vars: &BTreeMap<String, Str
         _ => Ok(Next::Pick(
             edges
                 .iter()
-                .map(|e| (e.to, e.label.clone().unwrap_or_else(|| "(tanpa syarat)".into())))
+                .map(|e| {
+                    (
+                        e.to,
+                        e.label.clone().unwrap_or_else(|| "(tanpa syarat)".into()),
+                    )
+                })
                 .collect(),
         )),
     }
@@ -197,7 +237,10 @@ pub fn choose_next(edges: &[&crate::flow::FlowEdge], vars: &BTreeMap<String, Str
 fn status_matches(pattern: &str, status: u16) -> bool {
     let p = pattern.trim();
     if let Some(class) = p.strip_suffix("xx") {
-        return class.parse::<u16>().map(|c| status / 100 == c).unwrap_or(false);
+        return class
+            .parse::<u16>()
+            .map(|c| status / 100 == c)
+            .unwrap_or(false);
     }
     p.parse::<u16>().map(|s| s == status).unwrap_or(false)
 }
@@ -222,7 +265,11 @@ pub fn run_step(step: &FlowStep, ctx: &mut Ctx, client: &reqwest::blocking::Clie
     }
 }
 
-fn execute(step: &FlowStep, ctx: &mut Ctx, client: &reqwest::blocking::Client) -> Result<StepReport> {
+fn execute(
+    step: &FlowStep,
+    ctx: &mut Ctx,
+    client: &reqwest::blocking::Client,
+) -> Result<StepReport> {
     let cfg = &step.cfg;
     let request = cfg.request.as_deref().expect("dicek pemanggil");
     let (method, path) = request
@@ -230,6 +277,7 @@ fn execute(step: &FlowStep, ctx: &mut Ctx, client: &reqwest::blocking::Client) -
         .with_context(|| format!("request harus `METHOD /path`: {request}"))?;
     let method: reqwest::Method = method.trim().parse().context("HTTP method tidak dikenal")?;
     let url = format!("{}{}", ctx.base_url, template(path.trim(), &ctx.vars)?);
+    let request_line = format!("{method} {url}");
 
     let mut req = client.request(method, &url);
     if let Some(profile) = &cfg.auth {
@@ -264,7 +312,9 @@ fn execute(step: &FlowStep, ctx: &mut Ctx, client: &reqwest::blocking::Client) -
                 notes.push(format!("capture {var} = {s}"));
                 ctx.vars.insert(var.clone(), s);
             }
-            None => notes.push(format!("capture {var}: path `{path}` tidak ada di response")),
+            None => notes.push(format!(
+                "capture {var}: path `{path}` tidak ada di response"
+            )),
         }
     }
 
@@ -295,7 +345,14 @@ fn execute(step: &FlowStep, ctx: &mut Ctx, client: &reqwest::blocking::Client) -
     } else {
         Outcome::Failed(failures.join("; "))
     };
-    Ok(StepReport { outcome, http_status: Some(http_status), ms, body: Some(body), notes })
+    Ok(StepReport {
+        outcome,
+        http_status: Some(http_status),
+        ms,
+        body: Some(body),
+        notes,
+        request_line: Some(request_line),
+    })
 }
 
 #[cfg(test)]
@@ -305,7 +362,10 @@ mod tests {
     use std::net::TcpListener;
 
     fn vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -318,7 +378,8 @@ mod tests {
 
     #[test]
     fn dot_get_walks_objects_and_arrays() {
-        let j: Value = serde_json::from_str(r#"{"data":{"order_lists":[{"id":"OL1"}],"n":5}}"#).unwrap();
+        let j: Value =
+            serde_json::from_str(r#"{"data":{"order_lists":[{"id":"OL1"}],"n":5}}"#).unwrap();
         assert_eq!(dot_get(&j, "data.order_lists.0.id").unwrap(), "OL1");
         assert_eq!(dot_get(&j, "data.n").unwrap(), 5);
         assert!(dot_get(&j, "data.zzz").is_none());
@@ -363,7 +424,10 @@ mod tests {
         assert_eq!(choose_next(&[&c3, &c2], &v).unwrap(), Next::Advance(3));
         // Tak ada cocok & tak ada fallback → Pick (ambigu).
         let c4 = e(5, Some("pay_mode == transfer"));
-        assert!(matches!(choose_next(&[&c3, &c4], &v).unwrap(), Next::Pick(_)));
+        assert!(matches!(
+            choose_next(&[&c3, &c4], &v).unwrap(),
+            Next::Pick(_)
+        ));
     }
 
     /// Server HTTP mock 1-request (std, tanpa dependency test tambahan).
@@ -385,19 +449,38 @@ mod tests {
     }
 
     fn step(request: &str, cfg_extra: impl FnOnce(&mut crate::config::StepConfig)) -> FlowStep {
-        let mut cfg = crate::config::StepConfig { request: Some(request.into()), ..Default::default() };
+        let mut cfg = crate::config::StepConfig {
+            request: Some(request.into()),
+            ..Default::default()
+        };
         cfg_extra(&mut cfg);
-        FlowStep { node_id: "t".into(), title: "t".into(), cfg, unconfigured: false }
+        FlowStep {
+            node_id: "t".into(),
+            title: "t".into(),
+            cfg,
+            unconfigured: false,
+        }
     }
 
     #[test]
     fn run_step_captures_and_asserts() {
-        let base = mock_server(r#"{"success":true,"data":{"id":"ORD1","status":"pending"}}"#, "201 Created");
-        let mut ctx = Ctx { base_url: base, tokens: BTreeMap::new(), vars: BTreeMap::new() };
+        let base = mock_server(
+            r#"{"success":true,"data":{"id":"ORD1","status":"pending"}}"#,
+            "201 Created",
+        );
+        let mut ctx = Ctx {
+            base_url: base,
+            tokens: BTreeMap::new(),
+            vars: BTreeMap::new(),
+        };
         let s = step("POST /api/v1/customer/orders", |c| {
             c.capture.insert("order_id".into(), "data.id".into());
-            c.assert.insert("status".into(), serde_yaml::Value::String("2xx".into()));
-            c.assert.insert("data.status".into(), serde_yaml::Value::String("pending".into()));
+            c.assert
+                .insert("status".into(), serde_yaml::Value::String("2xx".into()));
+            c.assert.insert(
+                "data.status".into(),
+                serde_yaml::Value::String("pending".into()),
+            );
         });
         let rep = run_step(&s, &mut ctx, &reqwest::blocking::Client::new());
         assert_eq!(rep.outcome, Outcome::Passed, "notes={:?}", rep.notes);
@@ -407,9 +490,16 @@ mod tests {
     #[test]
     fn run_step_fails_on_wrong_status_value() {
         let base = mock_server(r#"{"data":{"status":"accepted"}}"#, "200 OK");
-        let mut ctx = Ctx { base_url: base, tokens: BTreeMap::new(), vars: BTreeMap::new() };
+        let mut ctx = Ctx {
+            base_url: base,
+            tokens: BTreeMap::new(),
+            vars: BTreeMap::new(),
+        };
         let s = step("GET /x", |c| {
-            c.assert.insert("data.status".into(), serde_yaml::Value::String("pending".into()));
+            c.assert.insert(
+                "data.status".into(),
+                serde_yaml::Value::String("pending".into()),
+            );
         });
         let rep = run_step(&s, &mut ctx, &reqwest::blocking::Client::new());
         match rep.outcome {
@@ -421,7 +511,11 @@ mod tests {
     #[test]
     fn run_step_default_requires_2xx() {
         let base = mock_server(r#"{"success":false}"#, "502 Bad Gateway");
-        let mut ctx = Ctx { base_url: base, tokens: BTreeMap::new(), vars: BTreeMap::new() };
+        let mut ctx = Ctx {
+            base_url: base,
+            tokens: BTreeMap::new(),
+            vars: BTreeMap::new(),
+        };
         let s = step("GET /x", |_| {});
         let rep = run_step(&s, &mut ctx, &reqwest::blocking::Client::new());
         assert!(matches!(rep.outcome, Outcome::Failed(_)));

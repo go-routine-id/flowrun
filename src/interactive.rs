@@ -6,11 +6,16 @@ use std::io::{BufRead, Write};
 
 use anyhow::Result;
 
-use flowrun::engine::{choose_next, run_step, Ctx, Next, Outcome};
+use flowrun::engine::{Ctx, Next, Outcome, choose_next, run_step};
 use flowrun::flow::Flow;
-use flowrun::runner_ui::{print_report, Ui};
+use flowrun::runner_ui::{Ui, print_report};
 
-pub fn run(flow: &Flow, ctx: &mut Ctx, client: &reqwest::blocking::Client, ui: &mut Ui) -> Result<bool> {
+pub fn run(
+    flow: &Flow,
+    ctx: &mut Ctx,
+    client: &reqwest::blocking::Client,
+    ui: &mut Ui,
+) -> Result<bool> {
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     let mut ok_all = true;
@@ -23,7 +28,10 @@ pub fn run(flow: &Flow, ctx: &mut Ctx, client: &reqwest::blocking::Client, ui: &
         ran += 1;
         ui.set_current(cur)?;
         let role = step.cfg.auth.as_deref().unwrap_or("-");
-        println!("\n[{ran}/≤{total}] {}  ({} · auth:{})", step.title, step.node_id, role);
+        println!(
+            "\n[{ran}/≤{total}] {}  ({} · auth:{})",
+            step.title, step.node_id, role
+        );
         if let Some(n) = &step.cfg.note {
             println!("   📝 {n}");
         }
@@ -97,11 +105,12 @@ pub fn run(flow: &Flow, ctx: &mut Ctx, client: &reqwest::blocking::Client, ui: &
                     if ans == "q" {
                         return Ok(false);
                     }
-                    if let Ok(k) = ans.parse::<usize>() {
-                        if k >= 1 && k <= opts.len() {
-                            cur = opts[k - 1].0;
-                            break;
-                        }
+                    if let Ok(k) = ans.parse::<usize>()
+                        && k >= 1
+                        && k <= opts.len()
+                    {
+                        cur = opts[k - 1].0;
+                        break;
                     }
                     println!("   masukkan 1..{} atau q", opts.len());
                 }

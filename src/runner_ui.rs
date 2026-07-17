@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
-use crate::diagram::{render_status_svg, write_svg, NodeState};
+use crate::diagram::{NodeState, render_status_svg, write_svg};
 use crate::engine::{Outcome, StepReport};
 use crate::flow::Flow;
 
@@ -18,10 +18,18 @@ pub struct Ui {
 }
 
 impl Ui {
-    pub fn new(flow: &Flow, svg_path: Option<PathBuf>, shared_svg: Option<Arc<Mutex<String>>>) -> Result<Self> {
+    pub fn new(
+        flow: &Flow,
+        svg_path: Option<PathBuf>,
+        shared_svg: Option<Arc<Mutex<String>>>,
+    ) -> Result<Self> {
         let mut ui = Ui {
             mermaid_src: flow.mermaid_src.clone(),
-            states: flow.steps.iter().map(|s| (s.node_id.clone(), NodeState::Idle)).collect(),
+            states: flow
+                .steps
+                .iter()
+                .map(|s| (s.node_id.clone(), NodeState::Idle))
+                .collect(),
             svg_path,
             shared_svg,
         };
@@ -60,10 +68,10 @@ impl Ui {
         if let Some(p) = &self.svg_path {
             write_svg(p, &svg)?;
         }
-        if let Some(shared) = &self.shared_svg {
-            if let Ok(mut s) = shared.lock() {
-                *s = svg;
-            }
+        if let Some(shared) = &self.shared_svg
+            && let Ok(mut s) = shared.lock()
+        {
+            *s = svg;
         }
         Ok(())
     }
@@ -84,8 +92,15 @@ impl Ui {
 }
 
 pub fn print_report(rep: &StepReport) {
+    if let Some(line) = &rep.request_line {
+        println!("   \u{2192} {line}");
+    }
     match &rep.outcome {
-        Outcome::Passed => println!("   ✅ HTTP {} ({} ms)", rep.http_status.unwrap_or(0), rep.ms),
+        Outcome::Passed => println!(
+            "   ✅ HTTP {} ({} ms)",
+            rep.http_status.unwrap_or(0),
+            rep.ms
+        ),
         Outcome::Failed(msg) => {
             println!("   ❌ GAGAL: {msg}");
             if let Some(code) = rep.http_status {
@@ -94,7 +109,10 @@ pub fn print_report(rep: &StepReport) {
             if let Some(body) = &rep.body {
                 let pretty = serde_json::to_string_pretty(body).unwrap_or_default();
                 let trunc: String = pretty.chars().take(1500).collect();
-                println!("      body: {trunc}{}", if pretty.len() > 1500 { " …" } else { "" });
+                println!(
+                    "      body: {trunc}{}",
+                    if pretty.len() > 1500 { " …" } else { "" }
+                );
             }
         }
         Outcome::Skipped(reason) => println!("   ⏭  skip ({reason})"),

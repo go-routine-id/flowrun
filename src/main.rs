@@ -13,12 +13,16 @@ use clap::{Parser, Subcommand};
 
 use flowrun::config;
 use flowrun::diagram;
-use flowrun::engine::{run_step, Ctx, Outcome};
+use flowrun::engine::{Ctx, Outcome, run_step};
 use flowrun::flow;
-use flowrun::runner_ui::{print_report, Ui};
+use flowrun::runner_ui::{Ui, print_report};
 
 #[derive(Parser)]
-#[command(name = "flowrun", version, about = "Flow runner dinamis: mermaid + engine HTTP next-next")]
+#[command(
+    name = "flowrun",
+    version,
+    about = "Flow runner dinamis: mermaid + engine HTTP next-next"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -83,13 +87,23 @@ fn main() {
 fn real_main() -> Result<bool> {
     match Cli::parse().cmd {
         Cmd::Render { flow, out } => {
-            let src = std::fs::read_to_string(&flow).with_context(|| format!("baca {}", flow.display()))?;
+            let src = std::fs::read_to_string(&flow)
+                .with_context(|| format!("baca {}", flow.display()))?;
             let svg = flowmaid::render_svg(&src).map_err(|e| anyhow::anyhow!("render: {e:?}"))?;
             std::fs::write(&out, svg).with_context(|| format!("tulis {}", out.display()))?;
             println!("SVG → {}", out.display());
             Ok(true)
         }
-        Cmd::Run { flow, config, env, auto, svg, serve, vars, timeout } => {
+        Cmd::Run {
+            flow,
+            config,
+            env,
+            auto,
+            svg,
+            serve,
+            vars,
+            timeout,
+        } => {
             let flow_cfg = config::load_flow_config(&config)?;
             let env_cfg = config::load_env_config(&env)?;
             // Validasi token profil yang dideklarasikan flow tersedia & TIDAK
@@ -97,20 +111,23 @@ fn real_main() -> Result<bool> {
             // dan kegagalan baru muncul membingungkan di tengah flow.
             for p in &flow_cfg.auth_profiles {
                 match env_cfg.tokens.get(p) {
-                    None => anyhow::bail!("token profil '{p}' tidak ada di env file {}", env.display()),
+                    None => {
+                        anyhow::bail!("token profil '{p}' tidak ada di env file {}", env.display())
+                    }
                     Some(t) if t.trim().is_empty() => {
                         anyhow::bail!("token profil '{p}' KOSONG di env file {}", env.display())
                     }
                     Some(_) => {}
                 }
             }
+            let target_host = env_cfg.base_url.trim_end_matches('/').to_string();
             let mut ctx = Ctx::build(&flow_cfg, env_cfg, &vars);
             let parsed = flow::load(&flow, flow_cfg)?;
 
             let shared = serve.as_ref().map(|_| Arc::new(Mutex::new(String::new())));
             let mut ui = Ui::new(&parsed, svg, shared.clone())?;
             if let (Some(addr), Some(shared)) = (&serve, shared) {
-                diagram::serve_preview(addr, shared)?;
+                diagram::serve_preview(addr, shared, target_host.clone())?;
             }
 
             let client = reqwest::blocking::Client::builder()
@@ -176,11 +193,16 @@ fn run_auto(
             flowrun::engine::Next::Advance(nx) => cur = nx,
             flowrun::engine::Next::End => break,
             flowrun::engine::Next::Pick(opts) => {
-                println!("   ⚠ cabang ambigu di '{}' — mode auto butuh kondisi edge yang deterministik:", step.node_id);
+                println!(
+                    "   ⚠ cabang ambigu di '{}' — mode auto butuh kondisi edge yang deterministik:",
+                    step.node_id
+                );
                 for (t, label) in &opts {
                     println!("     → {} ({label})", parsed.steps[*t].node_id);
                 }
-                anyhow::bail!("cabang ambigu — tambahkan kondisi |var == nilai| / |else|, atau jalankan interaktif");
+                anyhow::bail!(
+                    "cabang ambigu — tambahkan kondisi |var == nilai| / |else|, atau jalankan interaktif"
+                );
             }
         }
     }

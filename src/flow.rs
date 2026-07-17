@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use flowmaid::model::Document;
 
 use crate::config::{FlowConfig, StepConfig};
@@ -81,7 +81,10 @@ pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
         [] => bail!("graf siklik: tidak ada node awal (semua punya incoming edge)"),
         many => bail!(
             "lebih dari satu node awal ({}) — flow butuh satu titik mulai",
-            many.iter().map(|&i| graph.nodes[i].id.as_str()).collect::<Vec<_>>().join(", ")
+            many.iter()
+                .map(|&i| graph.nodes[i].id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     };
 
@@ -104,7 +107,10 @@ pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
             .filter(|i| !topo.contains(i))
             .map(|i| graph.nodes[i].id.as_str())
             .collect();
-        bail!("graf siklik terdeteksi (node: {}) — DAG saja yang didukung", stuck.join(", "));
+        bail!(
+            "graf siklik terdeteksi (node: {}) — DAG saja yang didukung",
+            stuck.join(", ")
+        );
     }
 
     // Validasi sidecar: semua step di yaml harus ada di graf.
@@ -116,7 +122,11 @@ pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
     if !unknown.is_empty() {
         bail!(
             "step di flow.yaml tidak ada di flow.mmd: {}",
-            unknown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            unknown
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 
@@ -132,7 +142,13 @@ pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
             let node = &graph.nodes[gi];
             let (step_cfg, unconfigured) = match cfg.steps.get(&node.id) {
                 Some(c) => (c.clone(), false),
-                None => (StepConfig { manual: true, ..Default::default() }, true),
+                None => (
+                    StepConfig {
+                        manual: true,
+                        ..Default::default()
+                    },
+                    true,
+                ),
             };
             FlowStep {
                 node_id: node.id.clone(),
@@ -156,7 +172,12 @@ pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
                     Some(t.to_string())
                 }
             });
-            FlowEdge { from: pos[e.from], to: pos[e.to], cond, label }
+            FlowEdge {
+                from: pos[e.from],
+                to: pos[e.to],
+                cond,
+                label,
+            }
         })
         .collect();
 
@@ -166,7 +187,13 @@ pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
     }
     let linear = outdeg.iter().all(|&d| d <= 1);
 
-    Ok(Flow { mermaid_src: src, steps, edges, start: pos[start_g], linear })
+    Ok(Flow {
+        mermaid_src: src,
+        steps,
+        edges,
+        start: pos[start_g],
+        linear,
+    })
 }
 
 #[cfg(test)]
@@ -190,7 +217,13 @@ mod tests {
             "flowchart LR\n  a[Langkah A]:::cust --> b[Langkah B]:::ownr\n  b --> c[Langkah C]\n  classDef cust fill:#3b82f6\n  classDef ownr fill:#f59e0b\n",
         );
         let mut cfg = FlowConfig::default();
-        cfg.steps.insert("b".into(), StepConfig { request: Some("GET /x".into()), ..Default::default() });
+        cfg.steps.insert(
+            "b".into(),
+            StepConfig {
+                request: Some("GET /x".into()),
+                ..Default::default()
+            },
+        );
         let flow = load(&p, cfg).unwrap();
         std::fs::remove_file(&p).ok();
         let ids: Vec<&str> = flow.steps.iter().map(|s| s.node_id.as_str()).collect();
