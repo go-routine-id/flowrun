@@ -1333,21 +1333,31 @@ impl App {
             .resizable(true)
             .default_height(130.0)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
+                // Scroll DUA arah: baris panjang (curl/auth/JSON) bisa digeser
+                // horizontal alih-alih terpotong di tepi kanan.
+                egui::ScrollArea::both()
                     .stick_to_bottom(true)
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for line in &sess.log {
                             ui.horizontal_top(|ui| {
-                                ui.monospace(
-                                    egui::RichText::new(format!("T+{:6.1}s", line.t))
-                                        .color(rgb(0x6b7280))
-                                        .size(10.5),
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format!("T+{:6.1}s", line.t))
+                                            .color(rgb(0x6b7280))
+                                            .monospace()
+                                            .size(10.5),
+                                    )
+                                    .wrap_mode(egui::TextWrapMode::Extend),
                                 );
-                                ui.label(
-                                    egui::RichText::new(&line.text)
-                                        .color(line.color)
-                                        .monospace()
-                                        .size(11.0),
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&line.text)
+                                            .color(line.color)
+                                            .monospace()
+                                            .size(11.0),
+                                    )
+                                    .wrap_mode(egui::TextWrapMode::Extend),
                                 );
                             });
                         }
