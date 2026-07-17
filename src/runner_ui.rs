@@ -91,14 +91,20 @@ impl Ui {
     }
 }
 
-fn compact(v: &serde_json::Value, max: usize) -> String {
-    let s = v.to_string();
-    if s.chars().count() > max {
-        let t: String = s.chars().take(max).collect();
-        format!("{t}\u{2026}")
-    } else {
-        s
+/// JSON pretty ter-indentasi utk terminal; dipangkas pada 40 baris.
+fn pretty(v: &serde_json::Value, indent: &str) -> String {
+    let p = serde_json::to_string_pretty(v).unwrap_or_default();
+    let mut out = String::new();
+    for (i, l) in p.lines().enumerate() {
+        if i >= 40 {
+            out.push_str(&format!("\n{indent}\u{2026} (dipangkas)"));
+            break;
+        }
+        out.push('\n');
+        out.push_str(indent);
+        out.push_str(l);
     }
+    out
 }
 
 pub fn print_report(rep: &StepReport) {
@@ -109,7 +115,7 @@ pub fn print_report(rep: &StepReport) {
         println!("   \u{1f511} auth    : {a}");
     }
     if let Some(b) = &rep.request_body {
-        println!("   \u{21e2} payload : {}", compact(b, 600));
+        println!("   \u{21e2} payload :{}", pretty(b, "      "));
     }
     if let Some(c) = &rep.curl {
         println!("   $ {c}");
@@ -117,7 +123,7 @@ pub fn print_report(rep: &StepReport) {
     if matches!(rep.outcome, Outcome::Passed)
         && let Some(b) = &rep.body
     {
-        println!("   \u{21e0} response: {}", compact(b, 600));
+        println!("   \u{21e0} response:{}", pretty(b, "      "));
     }
     match &rep.outcome {
         Outcome::Passed => println!(

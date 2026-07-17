@@ -705,40 +705,10 @@ impl Session {
                         line.push_str(&format!("\n      \u{1f511} auth    : {a}"));
                     }
                     if let Some(b) = &r.request_body {
-                        let s = b.to_string();
-                        let t: String = s.chars().take(400).collect();
-                        let ell = if s.chars().count() > 400 {
-                            "\u{2026}"
-                        } else {
-                            ""
-                        };
-                        line.push_str(&format!("\n      \u{21e2} payload : {t}{ell}"));
+                        line.push_str(&pretty_block("\u{21e2} payload ", b));
                     }
                     if let Some(b) = &r.body {
-                        let s = b.to_string();
-                        let t: String = s.chars().take(400).collect();
-                        let ell = if s.chars().count() > 400 {
-                            "\u{2026}"
-                        } else {
-                            ""
-                        };
-                        line.push_str(&format!("\n      \u{21e0} response: {t}{ell}"));
-                    }
-                    if let Some(b) = &r.request_body {
-                        let s = b.to_string();
-                        let t: String = s.chars().take(400).collect();
-                        line.push_str(&format!(
-                            "\n      \u{21e2} payload : {t}{}",
-                            if s.len() > 400 { "\u{2026}" } else { "" }
-                        ));
-                    }
-                    if let Some(b) = &r.body {
-                        let s = b.to_string();
-                        let t: String = s.chars().take(400).collect();
-                        line.push_str(&format!(
-                            "\n      \u{21e0} response: {t}{}",
-                            if s.len() > 400 { "\u{2026}" } else { "" }
-                        ));
+                        line.push_str(&pretty_block("\u{21e0} response", b));
                     }
                     for n in &r.notes {
                         line.push_str(&format!("\n      {n}"));
@@ -964,6 +934,22 @@ fn draw_premium_bg(painter: &egui::Painter, rect: egui::Rect, pan: egui::Vec2, z
         m.add_triangle(0, 2, 3);
         painter.add(egui::Shape::mesh(m));
     }
+}
+
+/// Blok JSON pretty utk log: label + tiap baris ter-indentasi; dipangkas
+/// bila raksasa (lengkapnya selalu ada di panel kanan / copy JSON).
+fn pretty_block(label: &str, v: &serde_json::Value) -> String {
+    let pretty = serde_json::to_string_pretty(v).unwrap_or_default();
+    let mut out = format!("\n      {label}:");
+    for (i, l) in pretty.lines().enumerate() {
+        if i >= 40 {
+            out.push_str("\n        \u{2026} (dipangkas \u{2014} lengkap di panel kanan)");
+            break;
+        }
+        out.push_str("\n        ");
+        out.push_str(l);
+    }
+    out
 }
 
 fn rgb(hex: u32) -> egui::Color32 {
