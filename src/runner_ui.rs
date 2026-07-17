@@ -111,10 +111,10 @@ pub fn print_report(rep: &StepReport) {
     if let Some(c) = &rep.curl {
         println!("   $ {c}");
     }
-    if matches!(rep.outcome, Outcome::Passed) {
-        if let Some(b) = &rep.body {
-            println!("   \u{21e0} response: {}", compact(b, 600));
-        }
+    if matches!(rep.outcome, Outcome::Passed)
+        && let Some(b) = &rep.body
+    {
+        println!("   \u{21e0} response: {}", compact(b, 600));
     }
     match &rep.outcome {
         Outcome::Passed => println!(
