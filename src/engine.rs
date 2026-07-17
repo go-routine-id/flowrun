@@ -59,6 +59,11 @@ pub struct StepReport {
     /// `METHOD url-lengkap` yang benar-benar di-hit (setelah templating) —
     /// supaya target host selalu terlihat di CLI/GUI/preview.
     pub request_line: Option<String>,
+    /// Payload JSON yang benar-benar dikirim (setelah templating).
+    pub request_body: Option<Value>,
+    /// Perintah curl siap-copy; token disamarkan `${TOKEN_<PROFIL>}` agar
+    /// aman tampil di log/screenshot.
+    pub curl: Option<String>,
 }
 
 impl StepReport {
@@ -70,6 +75,8 @@ impl StepReport {
             body: None,
             notes: vec![],
             request_line: None,
+            request_body: None,
+            curl: None,
         }
     }
     fn manual() -> Self {
@@ -80,6 +87,8 @@ impl StepReport {
             body: None,
             notes: vec![],
             request_line: None,
+            request_body: None,
+            curl: None,
         }
     }
     fn failed(msg: String) -> Self {
@@ -90,6 +99,8 @@ impl StepReport {
             body: None,
             notes: vec![],
             request_line: None,
+            request_body: None,
+            curl: None,
         }
     }
 }
@@ -279,20 +290,33 @@ fn execute(
     let url = format!("{}{}", ctx.base_url, template(path.trim(), &ctx.vars)?);
     let request_line = format!("{method} {url}");
 
-    let mut req = client.request(method, &url);
+    let mut req = client.request(method.clone(), &url);
+    let mut curl = format!("curl -X {method} '{url}'");
     if let Some(profile) = &cfg.auth {
         let token = ctx
             .tokens
             .get(profile)
             .with_context(|| format!("token profil auth '{profile}' tidak ada di env file"))?;
         req = req.bearer_auth(token);
+        curl.push_str(&format!(
+            " -H \"Authorization: Bearer ${{TOKEN_{}}}\"",
+            profile.to_uppercase()
+        ));
     }
     for (k, v) in &cfg.headers {
-        req = req.header(k, template(v, &ctx.vars)?);
+        let vr = template(v, &ctx.vars)?;
+        curl.push_str(&format!(" -H '{k}: {vr}'"));
+        req = req.header(k, vr);
     }
+    let mut request_body: Option<Value> = None;
     if let Some(body) = &cfg.body {
         let json: Value = serde_json::to_value(body).context("body YAML → JSON")?;
-        req = req.json(&template_json(&json, &ctx.vars)?);
+        let rendered = template_json(&json, &ctx.vars)?;
+        curl.push_str(&format!(
+            " -H 'Content-Type: application/json' -d '{rendered}'"
+        ));
+        req = req.json(&rendered);
+        request_body = Some(rendered);
     }
 
     let t0 = Instant::now();
@@ -352,6 +376,8 @@ fn execute(
         body: Some(body),
         notes,
         request_line: Some(request_line),
+        request_body,
+        curl: Some(curl),
     })
 }
 

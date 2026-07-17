@@ -91,9 +91,30 @@ impl Ui {
     }
 }
 
+fn compact(v: &serde_json::Value, max: usize) -> String {
+    let s = v.to_string();
+    if s.chars().count() > max {
+        let t: String = s.chars().take(max).collect();
+        format!("{t}\u{2026}")
+    } else {
+        s
+    }
+}
+
 pub fn print_report(rep: &StepReport) {
     if let Some(line) = &rep.request_line {
         println!("   \u{2192} {line}");
+    }
+    if let Some(b) = &rep.request_body {
+        println!("   \u{21e2} payload : {}", compact(b, 600));
+    }
+    if let Some(c) = &rep.curl {
+        println!("   $ {c}");
+    }
+    if matches!(rep.outcome, Outcome::Passed) {
+        if let Some(b) = &rep.body {
+            println!("   \u{21e0} response: {}", compact(b, 600));
+        }
     }
     match &rep.outcome {
         Outcome::Passed => println!(

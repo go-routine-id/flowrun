@@ -93,6 +93,8 @@ struct StepResult {
     ms: u128,
     msg: String,
     request_line: Option<String>,
+    request_body: Option<serde_json::Value>,
+    curl: Option<String>,
     notes: Vec<String>,
     body: Option<serde_json::Value>,
     vars: Vec<(String, String)>,
@@ -255,6 +257,8 @@ fn skip_result(idx: usize, ctx: &Ctx) -> StepResult {
         ms: 0,
         msg: "dilewati manual".into(),
         request_line: None,
+        request_body: None,
+        curl: None,
         notes: vec![],
         body: None,
         vars: snapshot_vars(ctx),
@@ -279,6 +283,8 @@ fn exec(
             ms: 0,
             msg: "langkah manual/eksternal".into(),
             request_line: None,
+            request_body: None,
+            curl: None,
             notes: vec![],
             body: None,
             vars: snapshot_vars(ctx),
@@ -300,6 +306,8 @@ fn exec(
         ms: rep.ms,
         msg,
         request_line: rep.request_line,
+        request_body: rep.request_body,
+        curl: rep.curl,
         notes: rep.notes,
         body: rep.body,
         vars: snapshot_vars(ctx),
@@ -683,6 +691,42 @@ impl Session {
                     let mut line = format!("{sym} {} {}  {}", self.meta[idx].node_id, http, r.msg);
                     if let Some(rl) = &r.request_line {
                         line.push_str(&format!("\n      \u{2192} {rl}"));
+                    }
+                    if let Some(b) = &r.request_body {
+                        let s = b.to_string();
+                        let t: String = s.chars().take(400).collect();
+                        let ell = if s.chars().count() > 400 {
+                            "\u{2026}"
+                        } else {
+                            ""
+                        };
+                        line.push_str(&format!("\n      \u{21e2} payload : {t}{ell}"));
+                    }
+                    if let Some(b) = &r.body {
+                        let s = b.to_string();
+                        let t: String = s.chars().take(400).collect();
+                        let ell = if s.chars().count() > 400 {
+                            "\u{2026}"
+                        } else {
+                            ""
+                        };
+                        line.push_str(&format!("\n      \u{21e0} response: {t}{ell}"));
+                    }
+                    if let Some(b) = &r.request_body {
+                        let s = b.to_string();
+                        let t: String = s.chars().take(400).collect();
+                        line.push_str(&format!(
+                            "\n      \u{21e2} payload : {t}{}",
+                            if s.len() > 400 { "\u{2026}" } else { "" }
+                        ));
+                    }
+                    if let Some(b) = &r.body {
+                        let s = b.to_string();
+                        let t: String = s.chars().take(400).collect();
+                        line.push_str(&format!(
+                            "\n      \u{21e0} response: {t}{}",
+                            if s.len() > 400 { "\u{2026}" } else { "" }
+                        ));
                     }
                     for n in &r.notes {
                         line.push_str(&format!("\n      {n}"));
@@ -1213,6 +1257,24 @@ impl App {
                                 egui::RichText::new(rl.as_str()).monospace().size(11.0),
                             );
                         }
+                        ui.horizontal(|ui| {
+                            if let Some(c) = &r.curl
+                                && ui
+                                    .small_button("\u{1F4CB} curl")
+                                    .on_hover_text("copy curl \u{2014} token disamarkan ${TOKEN_*}")
+                                    .clicked()
+                            {
+                                ui.output_mut(|o| o.copied_text = c.clone());
+                            }
+                            if let Some(b) = &r.request_body
+                                && ui.small_button("\u{1F4CB} payload").clicked()
+                            {
+                                ui.output_mut(|o| {
+                                    o.copied_text =
+                                        serde_json::to_string_pretty(b).unwrap_or_default()
+                                });
+                            }
+                        });
                         let col = match r.status {
                             Some(c) if c >= 500 => rgb(0xef4444),
                             Some(c) if c >= 400 => rgb(0xf59e0b),
