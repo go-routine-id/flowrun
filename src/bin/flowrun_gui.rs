@@ -259,7 +259,7 @@ fn skip_result(idx: usize, ctx: &Ctx) -> StepResult {
         state: NodeState::Skip,
         status: None,
         ms: 0,
-        msg: "dilewati manual".into(),
+        msg: "skipped (manual)".into(),
         request_line: None,
         request_body: None,
         curl: None,
@@ -286,7 +286,7 @@ fn exec(
             state: NodeState::Manual,
             status: None,
             ms: 0,
-            msg: "langkah manual/eksternal".into(),
+            msg: "manual/external step".into(),
             request_line: None,
             request_body: None,
             curl: None,
@@ -535,6 +535,10 @@ fn role_of(auth: Option<&str>) -> Role {
 struct LogLine {
     t: f64,
     text: String,
+    /// Detail multi-baris (payload/response/auth). None = baris ringkas tanpa
+    /// lipatan. Default tertutup (`expanded=false`) agar log ringkas.
+    detail: Option<String>,
+    expanded: bool,
     color: egui::Color32,
 }
 
@@ -587,7 +591,7 @@ impl Session {
         for p in &flow_cfg.auth_profiles {
             match env.tokens.get(p) {
                 Some(t) if !t.trim().is_empty() => {}
-                _ => anyhow::bail!("token profil '{p}' kosong — isi di panel koneksi"),
+                _ => anyhow::bail!("token for profile '{p}' is empty — set it in the connection panel"),
             }
         }
         let base_url = env.base_url.trim_end_matches('/').to_string();
@@ -663,7 +667,26 @@ impl Session {
 
     fn logln(&mut self, text: String, color: egui::Color32) {
         let t = self.started.elapsed().as_secs_f64();
-        self.log.push(LogLine { t, text, color });
+        self.log.push(LogLine {
+            t,
+            text,
+            detail: None,
+            expanded: false,
+            color,
+        });
+    }
+
+    /// Log dengan detail terlipat: `text` = ringkasan satu baris, `detail` =
+    /// blok multi-baris yang tampil hanya saat entri dibuka.
+    fn logln_detail(&mut self, text: String, detail: String, color: egui::Color32) {
+        let t = self.started.elapsed().as_secs_f64();
+        self.log.push(LogLine {
+            t,
+            text,
+            detail: Some(detail),
+            expanded: false,
+            color,
+        });
     }
 
     fn drain_events(&mut self) {
@@ -713,7 +736,14 @@ impl Session {
                     for n in &r.notes {
                         line.push_str(&format!("\n      {n}"));
                     }
-                    self.logln(line, col);
+                    // Baris pertama = ringkasan (selalu tampil); sisanya = detail
+                    // yang terlipat (default tertutup, buka saat entri diklik).
+                    match line.split_once('\n') {
+                        Some((summary, detail)) => {
+                            self.logln_detail(summary.to_string(), detail.to_string(), col)
+                        }
+                        None => self.logln(line, col),
+                    }
                     self.results[idx] = Some(r);
                 }
                 Evt::NeedChoice(opts) => {
@@ -722,19 +752,19 @@ impl Session {
                         .map(|(t, l)| format!("{} ({l})", self.meta[*t].title))
                         .collect::<Vec<_>>()
                         .join(" · ");
-                    self.logln(format!("🔀 pilih cabang: {daftar}"), rgb(0xeab308));
+                    self.logln(format!("🔀 choose branch: {daftar}"), rgb(0xeab308));
                     self.pending = Some(opts);
                 }
                 Evt::FlowDone => {
                     self.finished = true;
                     self.logln(
-                        "🎉 jalur selesai — node tak dilalui diredupkan".into(),
+                        "🎉 path complete — untraversed nodes dimmed".into(),
                         rgb(0x22c55e),
                     );
                 }
                 Evt::AutoDone => {
                     self.auto_running = false;
-                    self.logln("auto berhenti".into(), rgb(0x9ca3af));
+                    self.logln("auto stopped".into(), rgb(0x9ca3af));
                 }
                 Evt::Reset => {
                     self.states.iter_mut().for_each(|s| *s = NodeState::Idle);
@@ -744,7 +774,7 @@ impl Session {
                     self.auto_running = false;
                     self.pending = None;
                     self.finished = false;
-                    self.logln("reset — siap dari awal".into(), rgb(0x9ca3af));
+                    self.logln("reset — ready from the start".into(), rgb(0x9ca3af));
                 }
             }
         }
@@ -1183,7 +1213,7 @@ impl App {
 
     fn try_start(&mut self) {
         let (Some(f), Some(c)) = (self.picker.flow.clone(), self.picker.cfg.clone()) else {
-            self.picker.error = Some("pilih flow.mmd dan flow.yaml dulu".into());
+            self.picker.error = Some("select flow.mmd and flow.yaml first".into());
             return;
         };
         match Session::start(
@@ -1270,7 +1300,7 @@ impl App {
                                 if !ready {
                                     ui.add_space(4.0);
                                     ui.label(
-                                        egui::RichText::new("Pilih flow.mmd + flow.yaml dulu untuk memulai.")
+                                        egui::RichText::new("Select flow.mmd + flow.yaml to begin.")
                                             .size(11.0)
                                             .color(rgb(0x64748b)),
                                     );
@@ -1302,7 +1332,7 @@ impl App {
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(
-                "Flow-runner visual — jalankan alur API multi-langkah, next-next atau auto.",
+                "Visual flow-runner — run multi-step API flows, step-by-step or auto.",
             )
             .size(13.5)
             .color(rgb(0x8b95a7)),
@@ -1323,7 +1353,7 @@ impl App {
 
     /// Kartu sumber flow: 3 baris pemilih file.
     fn picker_sources(&mut self, ui: &mut egui::Ui) {
-        section_label(ui, "Sumber Flow");
+        section_label(ui, "Flow Source");
         card_lg(ui, |ui| {
             #[derive(Clone, Copy)]
             enum Slot {
@@ -1375,7 +1405,7 @@ impl App {
                             let hint = if matches!(slot, Slot::Env) {
                                 "(opsional — token & base_url)"
                             } else {
-                                "(belum dipilih)"
+                                "(none selected)"
                             };
                             ui.label(egui::RichText::new(hint).italics().color(rgb(0x6b7688)));
                         }
@@ -1383,7 +1413,7 @@ impl App {
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
-                            if ui.button("Pilih…").clicked() {
+                            if ui.button("Select…").clicked() {
                                 let mut dlg = rfd::FileDialog::new();
                                 if !exts.is_empty() {
                                     dlg = dlg.add_filter(*filter, exts);
@@ -1414,10 +1444,10 @@ impl App {
 
     /// Kartu koneksi: base_url + token + vars.
     fn picker_connection(&mut self, ui: &mut egui::Ui) {
-        section_label(ui, "Koneksi");
+        section_label(ui, "Connection");
         card_lg(ui, |ui| {
             ui.label(
-                egui::RichText::new("Hanya untuk sesi ini — tidak ditulis ke file.")
+                egui::RichText::new("This session only — never written to file.")
                     .size(11.0)
                     .color(rgb(0x64748b)),
             );
@@ -1444,7 +1474,7 @@ impl App {
                 );
             });
             ui.add_space(10.0);
-            ui.checkbox(&mut self.picker.show_tokens, "tampilkan token");
+            ui.checkbox(&mut self.picker.show_tokens, "show tokens");
             let show = self.picker.show_tokens;
             for (name, val) in &mut self.picker.tokens {
                 ui.add_space(8.0);
@@ -1513,18 +1543,18 @@ impl App {
                     ui.add_sized(
                         [LBL_W, 24.0],
                         egui::TextEdit::singleline(&mut self.picker.new_var_k)
-                            .hint_text("kunci"),
+                            .hint_text("key"),
                     );
                     let mut do_add = false;
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
-                            do_add = ui.button("+ tambah").clicked();
+                            do_add = ui.button("+ add").clicked();
                             ui.add_space(4.0);
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.picker.new_var_v)
                                     .desired_width(ui.available_width())
-                                    .hint_text("nilai"),
+                                    .hint_text("value"),
                             );
                         },
                     );
@@ -1547,7 +1577,7 @@ impl App {
             return;
         }
         ui.add_space(10.0);
-        section_label(ui, "Terakhir Dibuka");
+        section_label(ui, "Recently Opened");
         let recents = self.picker.recent.clone();
         for r in recents {
             let name = r
@@ -1612,7 +1642,7 @@ impl App {
         egui::TopBottomPanel::top("bar").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button("📂 Buka").clicked() {
+                if ui.button("📂 Open").clicked() {
                     back_to_picker = true;
                 }
                 ui.separator();
@@ -1642,8 +1672,8 @@ impl App {
                 ui.separator();
                 let mut dir = sess.dir;
                 if sess.linear {
-                    ui.selectable_value(&mut dir, LayoutDir::Snake, "🐍 Ular")
-                        .on_hover_text("lipat jadi beberapa baris — muat layar");
+                    ui.selectable_value(&mut dir, LayoutDir::Snake, "🐍 Snake")
+                        .on_hover_text("wrap into rows — fit on screen");
                 }
                 ui.selectable_value(&mut dir, LayoutDir::LR, "⇉ LR");
                 ui.selectable_value(&mut dir, LayoutDir::TD, "⇊ TD");
@@ -1668,9 +1698,9 @@ impl App {
                     .iter()
                     .filter(|s| matches!(s, NodeState::Fail))
                     .count();
-                let badge = if sess.finished { "  🎉 selesai" } else { "" };
+                let badge = if sess.finished { "  🎉 done" } else { "" };
                 ui.label(format!(
-                    "dilalui {visited}/{}   ✅ {done}  ❌ {fail}{badge}",
+                    "visited {visited}/{}   ✅ {done}  ❌ {fail}{badge}",
                     sess.total
                 ));
                 legend(ui, rgb(0x3b82f6), "Customer");
@@ -1682,24 +1712,50 @@ impl App {
                         .monospace()
                         .size(11.0),
                 )
-                .on_hover_text("base_url env — host yang di-hit semua langkah");
-                ui.small("pinch / \u{2318}+scroll = zoom \u{00b7} scroll = geser \u{00b7} drag = geser \u{00b7} F = fit \u{00b7} \u{2318}0 = 100%");
+                .on_hover_text("base_url env — host hit by every step");
+                ui.small("pinch / \u{2318}+scroll = zoom \u{00b7} scroll = pan \u{00b7} drag = pan \u{00b7} F = fit \u{00b7} \u{2318}0 = 100%");
             });
             ui.add_space(4.0);
         });
 
         // ---- log bawah ----
+        // Aksi lipatan dikumpulkan di sini lalu diterapkan SETELAH panel, agar
+        // tak perlu &mut sess di dalam closure yang meminjam sess.log immutable.
+        let mut toggle_log: Option<usize> = None;
+        let mut bulk_log: Option<bool> = None;
         egui::TopBottomPanel::bottom("log")
             .resizable(true)
             .default_height(130.0)
             .show(ctx, |ui| {
+                // Header: judul + tombol buka/tutup SEMUA detail sekaligus.
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("LOG")
+                            .color(rgb(0x6b7280))
+                            .size(10.5)
+                            .strong(),
+                    );
+                    if sess.log.iter().any(|l| l.detail.is_some()) {
+                        let any_collapsed =
+                            sess.log.iter().any(|l| l.detail.is_some() && !l.expanded);
+                        let label = if any_collapsed {
+                            "\u{25be} expand all"
+                        } else {
+                            "\u{25b8} collapse all"
+                        };
+                        if ui.small_button(label).clicked() {
+                            bulk_log = Some(any_collapsed);
+                        }
+                    }
+                });
+                ui.separator();
                 // Scroll DUA arah: baris panjang (curl/auth/JSON) bisa digeser
                 // horizontal alih-alih terpotong di tepi kanan.
                 egui::ScrollArea::both()
                     .stick_to_bottom(true)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        for line in &sess.log {
+                        for (i, line) in sess.log.iter().enumerate() {
                             ui.horizontal_top(|ui| {
                                 ui.add(
                                     egui::Label::new(
@@ -1710,19 +1766,56 @@ impl App {
                                     )
                                     .wrap_mode(egui::TextWrapMode::Extend),
                                 );
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(&line.text)
-                                            .color(line.color)
-                                            .monospace()
-                                            .size(11.0),
-                                    )
-                                    .wrap_mode(egui::TextWrapMode::Extend),
-                                );
+                                // Penanda lipatan ▸/▾ hanya bila entri punya detail.
+                                let marker = match &line.detail {
+                                    Some(_) if line.expanded => "\u{25be} ", // ▾
+                                    Some(_) => "\u{25b8} ",                  // ▸
+                                    None => "  ",
+                                };
+                                let label = egui::Label::new(
+                                    egui::RichText::new(format!("{marker}{}", line.text))
+                                        .color(line.color)
+                                        .monospace()
+                                        .size(11.0),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Extend);
+                                if line.detail.is_some() {
+                                    let r = ui
+                                        .add(label.sense(egui::Sense::click()))
+                                        .on_hover_text("click to expand/collapse");
+                                    if r.clicked() {
+                                        toggle_log = Some(i);
+                                    }
+                                } else {
+                                    ui.add(label);
+                                }
                             });
+                            if line.expanded {
+                                if let Some(d) = &line.detail {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(d)
+                                                .color(line.color)
+                                                .monospace()
+                                                .size(11.0),
+                                        )
+                                        .wrap_mode(egui::TextWrapMode::Extend),
+                                    );
+                                }
+                            }
                         }
                     });
             });
+        if let Some(i) = toggle_log {
+            sess.log[i].expanded = !sess.log[i].expanded;
+        }
+        if let Some(v) = bulk_log {
+            for l in sess.log.iter_mut() {
+                if l.detail.is_some() {
+                    l.expanded = v;
+                }
+            }
+        }
 
         // ---- inspector kanan ----
         egui::SidePanel::right("inspector")
@@ -1777,11 +1870,11 @@ impl App {
                                     }
                                 }
                                 let (stxt, scol) = match st {
-                                    NodeState::Ok => ("selesai", rgb(0x22c55e)),
-                                    NodeState::Fail => ("gagal", rgb(0xef4444)),
-                                    NodeState::Skip => ("dilewati", rgb(0x94a3b8)),
+                                    NodeState::Ok => ("done", rgb(0x22c55e)),
+                                    NodeState::Fail => ("failed", rgb(0xef4444)),
+                                    NodeState::Skip => ("skipped", rgb(0x94a3b8)),
                                     NodeState::Manual => ("manual", rgb(0xa78bfa)),
-                                    NodeState::Current => ("berjalan", rgb(0x3b82f6)),
+                                    NodeState::Current => ("running", rgb(0x3b82f6)),
                                     NodeState::Idle => ("antre", rgb(0x64748b)),
                                 };
                                 pill(ui, stxt, scol.gamma_multiply(0.16), scol, false);
@@ -1823,7 +1916,7 @@ impl App {
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
                                 let hit = egui::Button::new(
-                                    egui::RichText::new("\u{27f3}  Hit node ini")
+                                    egui::RichText::new("\u{27f3}  Run this node")
                                         .color(egui::Color32::WHITE)
                                         .size(12.0),
                                 )
@@ -1832,7 +1925,7 @@ impl App {
                                 if ui
                                     .add(hit)
                                     .on_hover_text(
-                                        "jalankan ulang node ini sekarang (tanpa memajukan urutan)",
+                                        "re-run this node now (without advancing the sequence)",
                                     )
                                     .clicked()
                                 {
@@ -1842,7 +1935,7 @@ impl App {
                                     if let Some(c) = &r.curl
                                         && ui
                                             .small_button("\u{1F4CB} curl")
-                                            .on_hover_text("copy perintah curl")
+                                            .on_hover_text("copy curl command")
                                             .clicked()
                                     {
                                         ui.output_mut(|o| o.copied_text = c.clone());
@@ -1861,7 +1954,7 @@ impl App {
 
                         // ── hasil eksekusi ──
                         if let Some(r) = &sess.results[i] {
-                            section_label(ui, "hasil");
+                            section_label(ui, "result");
                             card(ui, |ui| {
                                 ui.horizontal_wrapped(|ui| {
                                     let (scol, stext) = match r.status {
@@ -1941,12 +2034,12 @@ impl App {
                                             .color(rgb(0x3a4258)),
                                     );
                                     ui.label(
-                                        egui::RichText::new("belum dijalankan")
+                                        egui::RichText::new("not run yet")
                                             .color(rgb(0x8b93a7)),
                                     );
                                     ui.label(
                                         egui::RichText::new(
-                                            "tekan  \u{25b6} Next  atau  \u{27f3} Hit node ini",
+                                            "press  \u{25b6} Next  or  \u{27f3} Run this node",
                                         )
                                         .size(11.0)
                                         .color(rgb(0x5b6377)),
@@ -1961,7 +2054,7 @@ impl App {
                                 ui.add_space(14.0);
                                 ui.label(egui::RichText::new("\u{1f446}").size(20.0));
                                 ui.label(
-                                    egui::RichText::new("klik node untuk inspeksi")
+                                    egui::RichText::new("click a node to inspect")
                                         .color(rgb(0x8b93a7)),
                                 );
                                 ui.add_space(14.0);
@@ -1973,7 +2066,7 @@ impl App {
                     card(ui, |ui| {
                         if sess.vars.is_empty() {
                             ui.label(
-                                egui::RichText::new("kosong — terisi lewat capture")
+                                egui::RichText::new("empty — filled via capture")
                                     .size(11.0)
                                     .color(rgb(0x5b6377)),
                             );
@@ -2002,12 +2095,12 @@ impl App {
         // ---- modal pilih cabang (cabang ambigu / tanpa kondisi) ----
         let mut chosen: Option<usize> = None;
         if let Some(opts) = sess.pending.clone() {
-            egui::Window::new("🔀 Pilih cabang")
+            egui::Window::new("🔀 Choose branch")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
                 .show(ctx, |ui| {
-                    ui.label("Runner tiba di percabangan — jalur mana yang diambil?");
+                    ui.label("Runner reached a branch — which path to take?");
                     ui.add_space(6.0);
                     for (t, label) in &opts {
                         let m = &sess.meta[*t];
@@ -2033,7 +2126,7 @@ impl App {
                 sess.center_on = Some(t);
             }
             let title = sess.meta[t].title.clone();
-            sess.logln(format!("↪ cabang dipilih: {title}"), rgb(0xeab308));
+            sess.logln(format!("↪ branch chosen: {title}"), rgb(0xeab308));
         }
 
         // ---- canvas ----
