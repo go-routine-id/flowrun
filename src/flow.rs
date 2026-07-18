@@ -56,18 +56,18 @@ impl Flow {
 /// Parse `.mmd` → DAG + urutan topologis → merge sidecar.
 pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
     let src = std::fs::read_to_string(mmd_path)
-        .with_context(|| format!("baca {}", mmd_path.display()))?;
+        .with_context(|| format!("read {}", mmd_path.display()))?;
     let graph = match flowmaid::parser::parse_document(&src)
         .map_err(|e| anyhow::anyhow!("parse mermaid {}: {e:?}", mmd_path.display()))?
     {
         Document::Flowchart(g) | Document::State(g) => g,
         other => bail!(
-            "diagram harus flowchart/stateDiagram, dapat {:?}",
+            "diagram must be flowchart/stateDiagram, got {:?}",
             std::mem::discriminant(&other)
         ),
     };
     if graph.nodes.is_empty() {
-        bail!("flow kosong: tidak ada node di {}", mmd_path.display());
+        bail!("empty flow: no nodes in {}", mmd_path.display());
     }
 
     let n = graph.nodes.len();
@@ -78,9 +78,9 @@ pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
     let starts: Vec<usize> = (0..n).filter(|&i| indegree[i] == 0).collect();
     let start_g = match starts.as_slice() {
         [s] => *s,
-        [] => bail!("graf siklik: tidak ada node awal (semua punya incoming edge)"),
+        [] => bail!("cyclic graph: no start node (all have an incoming edge)"),
         many => bail!(
-            "lebih dari satu node awal ({}) — flow butuh satu titik mulai",
+            "more than one start node ({}) — a flow needs a single entry point",
             many.iter()
                 .map(|&i| graph.nodes[i].id.as_str())
                 .collect::<Vec<_>>()
@@ -108,7 +108,7 @@ pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
             .map(|i| graph.nodes[i].id.as_str())
             .collect();
         bail!(
-            "graf siklik terdeteksi (node: {}) — DAG saja yang didukung",
+            "cyclic graph detected (node: {}) — only DAGs are supported",
             stuck.join(", ")
         );
     }
@@ -121,7 +121,7 @@ pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
         .collect();
     if !unknown.is_empty() {
         bail!(
-            "step di flow.yaml tidak ada di flow.mmd: {}",
+            "step in flow.yaml not found in flow.mmd: {}",
             unknown
                 .iter()
                 .map(|s| s.as_str())
@@ -256,7 +256,7 @@ mod tests {
         let p = write_tmp("cycle", "flowchart LR\n  a --> b\n  b --> c\n  c --> b\n");
         let err = load(&p, FlowConfig::default()).unwrap_err().to_string();
         std::fs::remove_file(&p).ok();
-        assert!(err.contains("siklik"), "{err}");
+        assert!(err.contains("cyclic"), "{err}");
     }
 
     #[test]

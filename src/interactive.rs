@@ -37,7 +37,7 @@ pub fn run(
         }
 
         if step.cfg.manual || step.cfg.request.is_none() {
-            println!("   langkah manual/eksternal — kerjakan di luar, lalu [Enter]=lanjut  q=quit");
+            println!("   manual/external step — do it outside, then [Enter]=continue  q=quit");
             match prompt(&mut lines)?.as_str() {
                 "q" => return Ok(false),
                 _ => ui.set_manual(cur)?,
@@ -96,7 +96,7 @@ pub fn run(
             Next::Advance(nx) => cur = nx,
             Next::End => break,
             Next::Pick(opts) => {
-                println!("   🔀 pilih cabang:");
+                println!("   🔀 choose branch:");
                 for (k, (t, label)) in opts.iter().enumerate() {
                     println!("     {}. {} — {label}", k + 1, flow.steps[*t].title);
                 }
@@ -112,7 +112,7 @@ pub fn run(
                         cur = opts[k - 1].0;
                         break;
                     }
-                    println!("   masukkan 1..{} atau q", opts.len());
+                    println!("   enter 1..{} or q", opts.len());
                 }
             }
         }

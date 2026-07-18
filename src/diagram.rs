@@ -59,7 +59,7 @@ pub fn render_status_svg(src: &str, states: &[(String, NodeState)]) -> Result<St
 }
 
 pub fn write_svg(path: &Path, svg: &str) -> Result<()> {
-    std::fs::write(path, svg).with_context(|| format!("tulis {}", path.display()))
+    std::fs::write(path, svg).with_context(|| format!("write {}", path.display()))
 }
 
 /// Preview server mini (viewer saja, bukan UI kontrol): `/` = halaman

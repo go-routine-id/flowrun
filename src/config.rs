@@ -61,13 +61,13 @@ pub struct EnvConfig {
 
 pub fn load_flow_config(path: &Path) -> Result<FlowConfig> {
     let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("baca sidecar config {}", path.display()))?;
+        .with_context(|| format!("read sidecar config {}", path.display()))?;
     serde_yaml::from_str(&raw).with_context(|| format!("parse YAML {}", path.display()))
 }
 
 pub fn load_env_config(path: &Path) -> Result<EnvConfig> {
     let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("baca env file {}", path.display()))?;
+        .with_context(|| format!("read env file {}", path.display()))?;
     serde_yaml::from_str(&raw).with_context(|| format!("parse YAML {}", path.display()))
 }
 

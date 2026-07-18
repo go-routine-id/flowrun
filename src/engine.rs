@@ -137,7 +137,7 @@ pub fn template(input: &str, vars: &BTreeMap<String, String>) -> Result<String> 
     }
     out.push_str(rest);
     if !missing.is_empty() {
-        bail!("var belum terisi: {}", missing.join(", "));
+        bail!("unresolved var(s): {}", missing.join(", "));
     }
     Ok(out)
 }

@@ -21,7 +21,7 @@ use flowrun::runner_ui::{Ui, print_report};
 #[command(
     name = "flowrun",
     version,
-    about = "Flow runner dinamis: mermaid + engine HTTP next-next"
+    about = "Dynamic flow runner: mermaid + HTTP engine, step-by-step"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -30,37 +30,37 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Jalankan flow (interaktif next-next; --auto untuk CI/test).
+    /// Run a flow (interactive step-by-step; --auto for CI/test).
     Run {
-        /// File graf mermaid (.mmd)
+        /// Mermaid graph file (.mmd)
         #[arg(short = 'f', long)]
         flow: PathBuf,
-        /// Sidecar config runner (.yaml)
+        /// Runner sidecar config (.yaml)
         #[arg(short = 'c', long)]
         config: PathBuf,
-        /// Env file (base_url + tokens + vars) — jangan di-commit
+        /// Env file (base_url + tokens + vars) — do not commit
         #[arg(short = 'e', long)]
         env: PathBuf,
-        /// Non-interaktif: jalankan semua, stop-on-fail, exit code ≠ 0 bila gagal
+        /// Non-interactive: run all, stop-on-fail, exit code ≠ 0 on failure
         #[arg(long)]
         auto: bool,
-        /// Tulis SVG status live ke file ini
+        /// Write live status SVG to this file
         #[arg(long)]
         svg: Option<PathBuf>,
-        /// Preview server mini (mis. 127.0.0.1:8787)
+        /// Mini preview server (e.g. 127.0.0.1:8787)
         #[arg(long)]
         serve: Option<String>,
-        /// Tampilkan token ASLI di baris curl (default disamarkan ${TOKEN_*}).
+        /// Show REAL tokens in curl lines (default masked as ${TOKEN_*}).
         #[arg(long)]
         reveal_tokens: bool,
-        /// Override var (bisa berulang): --var kunci=nilai
+        /// Override a var (repeatable): --var key=value
         #[arg(long = "var", value_parser = parse_kv)]
         vars: Vec<(String, String)>,
-        /// Timeout HTTP per-request (detik)
+        /// Per-request HTTP timeout (seconds)
         #[arg(long, default_value_t = 20)]
         timeout: u64,
     },
-    /// Render .mmd → SVG sekali (tanpa eksekusi).
+    /// Render .mmd → SVG once (no execution).
     Render {
         #[arg(short = 'f', long)]
         flow: PathBuf,
@@ -72,7 +72,7 @@ enum Cmd {
 fn parse_kv(s: &str) -> Result<(String, String), String> {
     s.split_once('=')
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-        .ok_or_else(|| format!("format --var harus kunci=nilai, dapat: {s}"))
+        .ok_or_else(|| format!("--var format must be key=value, got: {s}"))
 }
 
 fn main() {
@@ -91,9 +91,9 @@ fn real_main() -> Result<bool> {
     match Cli::parse().cmd {
         Cmd::Render { flow, out } => {
             let src = std::fs::read_to_string(&flow)
-                .with_context(|| format!("baca {}", flow.display()))?;
+                .with_context(|| format!("read {}", flow.display()))?;
             let svg = flowmaid::render_svg(&src).map_err(|e| anyhow::anyhow!("render: {e:?}"))?;
-            std::fs::write(&out, svg).with_context(|| format!("tulis {}", out.display()))?;
+            std::fs::write(&out, svg).with_context(|| format!("write {}", out.display()))?;
             println!("SVG → {}", out.display());
             Ok(true)
         }
@@ -116,10 +116,16 @@ fn real_main() -> Result<bool> {
             for p in &flow_cfg.auth_profiles {
                 match env_cfg.tokens.get(p) {
                     None => {
-                        anyhow::bail!("token profil '{p}' tidak ada di env file {}", env.display())
+                        anyhow::bail!(
+                            "token for profile '{p}' not found in env file {}",
+                            env.display()
+                        )
                     }
                     Some(t) if t.trim().is_empty() => {
-                        anyhow::bail!("token profil '{p}' KOSONG di env file {}", env.display())
+                        anyhow::bail!(
+                            "token for profile '{p}' is EMPTY in env file {}",
+                            env.display()
+                        )
                     }
                     Some(_) => {}
                 }
@@ -129,7 +135,7 @@ fn real_main() -> Result<bool> {
             ctx.reveal_tokens = reveal_tokens;
             if reveal_tokens {
                 eprintln!(
-                    "\u{26a0} --reveal-tokens AKTIF: curl memuat token asli \u{2014} jangan bagikan log ini."
+                    "\u{26a0} --reveal-tokens ON: curl contains real tokens \u{2014} do not share this log."
                 );
             }
             let parsed = flow::load(&flow, flow_cfg)?;
@@ -151,13 +157,13 @@ fn real_main() -> Result<bool> {
             };
 
             let (pass, fail, skip, idle) = ui.tally();
-            println!("\n=== ringkasan: ✅ {pass}  ❌ {fail}  ⏭ {skip}  ⚪ {idle} ===");
+            println!("\n=== summary: ✅ {pass}  ❌ {fail}  ⏭ {skip}  ⚪ {idle} ===");
 
             // Preview tetap hidup setelah flow selesai (mode interaktif) agar
             // diagram terakhir bisa dilihat di browser. Mode --auto (CI) tetap
             // exit normal supaya exit-code kepakai.
             if let (Some(addr), false) = (&serve, auto) {
-                println!("🔎 preview masih hidup di http://{addr} — Ctrl-C untuk berhenti");
+                println!("🔎 preview still live at http://{addr} — Ctrl-C to stop");
                 loop {
                     std::thread::sleep(Duration::from_secs(3600));
                 }
@@ -184,7 +190,7 @@ fn run_auto(
         ui.set_current(cur)?;
         println!("\n[{ran}/≤{total}] {} ({})", step.title, step.node_id);
         if step.cfg.manual || step.cfg.request.is_none() {
-            println!("   ✋ manual — dilewati di mode auto");
+            println!("   ✋ manual — skipped in auto mode");
             ui.set_manual(cur)?;
         } else {
             let rep = run_step(step, ctx, client);
@@ -204,14 +210,14 @@ fn run_auto(
             flowrun::engine::Next::End => break,
             flowrun::engine::Next::Pick(opts) => {
                 println!(
-                    "   ⚠ cabang ambigu di '{}' — mode auto butuh kondisi edge yang deterministik:",
+                    "   ⚠ ambiguous branch at '{}' — auto mode needs deterministic edge conditions:",
                     step.node_id
                 );
                 for (t, label) in &opts {
                     println!("     → {} ({label})", parsed.steps[*t].node_id);
                 }
                 anyhow::bail!(
-                    "cabang ambigu — tambahkan kondisi |var == nilai| / |else|, atau jalankan interaktif"
+                    "ambiguous branch — add a |var == value| / |else| condition, or run interactively"
                 );
             }
         }

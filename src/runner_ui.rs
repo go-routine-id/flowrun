@@ -97,7 +97,7 @@ fn pretty(v: &serde_json::Value, indent: &str) -> String {
     let mut out = String::new();
     for (i, l) in p.lines().enumerate() {
         if i >= 40 {
-            out.push_str(&format!("\n{indent}\u{2026} (dipangkas)"));
+            out.push_str(&format!("\n{indent}\u{2026} (truncated)"));
             break;
         }
         out.push('\n');
@@ -132,7 +132,7 @@ pub fn print_report(rep: &StepReport) {
             rep.ms
         ),
         Outcome::Failed(msg) => {
-            println!("   ❌ GAGAL: {msg}");
+            println!("   ❌ FAILED: {msg}");
             if let Some(code) = rep.http_status {
                 println!("      HTTP {code} ({} ms)", rep.ms);
             }
@@ -146,7 +146,7 @@ pub fn print_report(rep: &StepReport) {
             }
         }
         Outcome::Skipped(reason) => println!("   ⏭  skip ({reason})"),
-        Outcome::Manual => println!("   ✋ langkah manual"),
+        Outcome::Manual => println!("   ✋ manual step"),
     }
     for n in &rep.notes {
         println!("      {n}");
