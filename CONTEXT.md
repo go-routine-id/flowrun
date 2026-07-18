@@ -2,7 +2,7 @@
 
 > Dokumen ini ditulis agar sesi Claude (atau engineer) berikutnya bisa lanjut
 > tanpa menggali dari nol. Update dokumen ini setiap kali ada keputusan/fitur besar.
-> Terakhir diperbarui: 16 Jul 2026 (v0.2.0).
+> Terakhir diperbarui: 18 Jul 2026 (v0.2.0 + premium UI).
 
 ## Apa ini & filosofi
 
@@ -24,6 +24,7 @@ Tiga pemisahan yang DISENGAJA (jangan dicampur lagi):
 | Templating `{{var}}`, capture dot-path, assert (status class + equality), `skip_if` | ✅ |
 | SVG status live (`--svg`) + preview server mini (`--serve`) | ✅ |
 | **Desktop egui** (`flowrun-gui`, feature `gui`): picker file + recent + editor koneksi/token/vars di UI, canvas pan/zoom/follow, panah, label wrap+fit, pulse node aktif, badge role, log panel, JSON tree, copy, "⟳ Hit node ini" (re-run per node) | ✅ |
+| **Premium UI (18 Jul)**: tema global gelap + aksen emas ⚡ (`apply_theme`), font fallback lintas-OS agar glyph → ◇ ⟳ tak jadi tofu (`apply_fonts`). Picker ditata ulang: latar gradien+grid, kolom terpusat 660px, hero, kartu `card_lg`, tombol utama, recent klik. Field koneksi kolom-label seragam (`LBL_W=150`, kiri-rata) + `vars seed` toggle manual (bukan `collapsing` yg indent) + baris right-to-left agar field & ikon rata | ✅ |
 | Layout: 🐍 **Ular/serpentine** (default utk rantai linear — flow panjang muat layar), ⇉ LR, ⇊ TD | ✅ |
 | **Percabangan (v0.2)**: kondisi = label edge mermaid (`-->\|pay_mode == cod\|`, `\|else\|` = fallback); GUI modal pilih cabang saat ambigu; `--auto` gagal deterministik; node tak dilalui diredupkan | ✅ |
 | Unit test 15/15 (parser, engine, cabang, mock HTTP via std TcpListener) | ✅ |
@@ -96,6 +97,8 @@ Jalur cabang diganti tanpa mengubah graf: `--var keputusan=tolak`, `--var pay_mo
 - Test file temp wajib nama unik per test (cargo test paralel satu proses).
 - `LayoutJob::simple` + `wrap.max_rows` + `halign=Center`, gambar via `painter.galley(pos, galley, color)` dgn pos = center − size/2.
 - flowmaid `scene.nodes[i]` SEJAJAR `graph.nodes[i]` (map id → step via indeks).
+- **Tofu glyph (□)**: font default egui (Ubuntu-Light) TAK punya `→`(U+2192), `◇`(U+25C7), `⟳`(U+27F3), dst. Fix = `apply_fonts()` menempel font sistem bercakupan-luas (macOS *Arial Unicode* → Apple Symbols → DejaVu Linux → Arial Windows) sebagai fallback TERAKHIR di kedua family. Teks Latin tetap pakai font default. Bila nambah glyph unik, pastikan ada di fallback.
+- **Rata field egui**: JANGAN hitung lebar via `available_width() - N` per baris (nilainya bergeser → tak rata). Pakai `Layout::right_to_left` (tombol/ikon dikunci kanan, TextEdit `desired_width(available_width())` mengisi sisa). Kolom label: lebar seragam + `allocate_ui_with_layout(left_to_right)` agar kiri-rata. `collapsing` MENG-INDENT isinya → untuk field yg harus sejajar dgn luar, pakai toggle bool manual.
 
 ## Backlog (urutan saran)
 

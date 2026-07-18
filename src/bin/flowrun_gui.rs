@@ -777,12 +777,14 @@ struct Picker {
     recent: Vec<RecentEntry>,
     new_var_k: String,
     new_var_v: String,
+    vars_open: bool,
 }
 
 impl Picker {
     fn new() -> Self {
         Picker {
             recent: load_recent(),
+            vars_open: true,
             ..Default::default()
         }
     }
@@ -956,6 +958,123 @@ fn rgb(hex: u32) -> egui::Color32 {
     egui::Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
 
+/// Aksen utama flowrun — kuning-emas listrik (⚡). Dipakai konsisten di seluruh
+/// tema: seleksi, fokus, tombol utama, garis hero.
+fn accent() -> egui::Color32 {
+    rgb(0xf5b83d)
+}
+/// Teks di atas tombol beraksen (kontras gelap agar tetap terbaca).
+fn on_accent() -> egui::Color32 {
+    rgb(0x1a1205)
+}
+
+/// Pasang font fallback bercakupan-luas agar simbol/panah (→ ◇ ⟳ …) yang
+/// tak ada di font default egui tak muncul sebagai kotak tofu (□). Font
+/// default tetap prioritas utama untuk teks Latin — fallback hanya dipakai
+/// saat glyph tak ditemukan. Cari kandidat lintas-OS; diam bila tak ada.
+fn apply_fonts(ctx: &egui::Context) {
+    const CANDIDATES: &[&str] = &[
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf", // macOS — cakupan penuh BMP
+        "/System/Library/Fonts/Apple Symbols.ttf",              // macOS — arrow/geometric
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",      // Linux
+        "C:/Windows/Fonts/arial.ttf",                           // Windows
+    ];
+    let mut bytes = None;
+    for p in CANDIDATES {
+        if let Ok(b) = std::fs::read(p) {
+            bytes = Some(b);
+            break;
+        }
+    }
+    let Some(bytes) = bytes else { return };
+
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "flowrun_fallback".to_owned(),
+        egui::FontData::from_owned(bytes),
+    );
+    // Tempel sebagai fallback TERAKHIR untuk kedua family.
+    for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(fam)
+            .or_default()
+            .push("flowrun_fallback".to_owned());
+    }
+    ctx.set_fonts(fonts);
+}
+
+/// Tema premium global (gelap, sudut membulat, aksen emas). Dipanggil sekali
+/// saat app dibuat sehingga picker & layar run seragam.
+fn apply_theme(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    let mut v = egui::Visuals::dark();
+    let a = accent();
+    let round = egui::Rounding::same(9.0);
+
+    v.panel_fill = rgb(0x0d0f15);
+    v.window_fill = rgb(0x141824);
+    v.window_rounding = egui::Rounding::same(12.0);
+    v.window_stroke = egui::Stroke::new(1.0, rgb(0x272e40));
+    v.extreme_bg_color = rgb(0x090b10); // background TextEdit
+    v.faint_bg_color = rgb(0x161b27);
+    v.override_text_color = Some(rgb(0xdbe1ea));
+    v.hyperlink_color = a;
+    v.selection.bg_fill = egui::Color32::from_rgba_unmultiplied(0xf5, 0xb8, 0x3d, 60);
+    v.selection.stroke = egui::Stroke::new(1.0, a);
+
+    v.widgets.noninteractive.rounding = round;
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, rgb(0x1e2536));
+
+    v.widgets.inactive.rounding = round;
+    v.widgets.inactive.bg_fill = rgb(0x1b2130);
+    v.widgets.inactive.weak_bg_fill = rgb(0x1b2130);
+    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, rgb(0x2a3244));
+    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, rgb(0xc4ccd8));
+
+    v.widgets.hovered.rounding = round;
+    v.widgets.hovered.bg_fill = rgb(0x232b3c);
+    v.widgets.hovered.weak_bg_fill = rgb(0x232b3c);
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.2, egui::Color32::from_rgba_unmultiplied(0xf5, 0xb8, 0x3d, 150));
+    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, rgb(0xf0f4fa));
+
+    v.widgets.active.rounding = round;
+    v.widgets.active.bg_fill = rgb(0x2b3446);
+    v.widgets.active.weak_bg_fill = rgb(0x2b3446);
+    v.widgets.active.bg_stroke = egui::Stroke::new(1.4, a);
+
+    style.visuals = v;
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    style.spacing.button_padding = egui::vec2(12.0, 7.0);
+    style.spacing.interact_size.y = 26.0;
+
+    use egui::{FontFamily, FontId, TextStyle};
+    style.text_styles = [
+        (TextStyle::Heading, FontId::new(24.0, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
+        (TextStyle::Button, FontId::new(14.0, FontFamily::Proportional)),
+        (TextStyle::Monospace, FontId::new(12.5, FontFamily::Monospace)),
+        (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
+    ]
+    .into();
+    ctx.set_style(style);
+}
+
+/// Tombol utama beraksen emas, lebar penuh — CTA "megah".
+fn primary_button(ui: &mut egui::Ui, text: &str, min_w: f32) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(text)
+                .strong()
+                .size(15.0)
+                .color(on_accent()),
+        )
+        .fill(accent())
+        .rounding(egui::Rounding::same(10.0))
+        .min_size(egui::vec2(min_w, 42.0)),
+    )
+}
+
 /// Chip kecil membulat (badge) — bahan dasar panel premium.
 fn pill(ui: &mut egui::Ui, text: &str, bg: egui::Color32, fg: egui::Color32, mono: bool) {
     egui::Frame::default()
@@ -1009,16 +1128,31 @@ fn card<R>(ui: &mut egui::Ui, f: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner
 }
 
+/// Kartu picker: padding lebih lega untuk layar buka (run screen tetap `card`).
+fn card_lg<R>(ui: &mut egui::Ui, f: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::default()
+        .fill(rgb(0x171c29))
+        .stroke(egui::Stroke::new(1.0, rgb(0x272e40)))
+        .rounding(egui::Rounding::same(12.0))
+        .inner_margin(egui::Margin::same(18.0))
+        .outer_margin(egui::Margin::symmetric(0.0, 2.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            f(ui)
+        })
+        .inner
+}
+
 /// Label section kecil huruf kapital — pemisah premium antar blok.
 fn section_label(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(8.0);
+    ui.add_space(12.0);
     ui.label(
         egui::RichText::new(text.to_uppercase())
-            .size(10.0)
-            .color(rgb(0x64748b))
+            .size(10.5)
+            .color(rgb(0x6b7688))
             .strong(),
     );
-    ui.add_space(2.0);
+    ui.add_space(7.0);
 }
 
 fn role_color(r: Role) -> egui::Color32 {
@@ -1084,159 +1218,383 @@ impl eframe::App for App {
 
 impl App {
     fn ui_picker(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.add_space(12.0);
-                ui.heading("⚡ flowrun — buka flow");
-                ui.add_space(8.0);
+        let panel_frame = egui::Frame::none().fill(rgb(0x0d0f15));
+        egui::CentralPanel::default()
+            .frame(panel_frame)
+            .show(ctx, |ui| {
+                // Latar premium (gradien + grid halus + vignette) — menyatu
+                // dengan kanvas layar run.
+                let full = ui.max_rect();
+                draw_premium_bg(ui.painter(), full, egui::Vec2::ZERO, 1.0);
 
-                let pick_row = |ui: &mut egui::Ui,
-                                label: &str,
-                                val: &Option<PathBuf>,
-                                exts: &[&str]|
-                 -> Option<PathBuf> {
-                    let mut out = None;
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(label).strong());
-                        if ui.button("Pilih…").clicked() {
-                            let mut dlg = rfd::FileDialog::new();
-                            if !exts.is_empty() {
-                                dlg = dlg.add_filter(label, exts);
-                            }
-                            if let Some(p) = dlg.pick_file() {
-                                out = Some(p);
-                            }
-                        }
-                        match val {
-                            Some(p) => ui.monospace(p.display().to_string()),
-                            None => ui.colored_label(rgb(0x9ca3af), "(belum dipilih)"),
-                        };
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // Kolom terpusat lebar-maks agar konten tidak tenggelam
+                        // di window besar.
+                        let colw = 660.0_f32.min(ui.available_width() - 48.0);
+                        let pad = ((ui.available_width() - colw) * 0.5).max(0.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(pad);
+                            ui.vertical(|ui| {
+                                ui.set_width(colw);
+                                ui.add_space(34.0);
+                                self.picker_hero(ui, colw);
+                                ui.add_space(18.0);
+                                self.picker_sources(ui);
+                                ui.add_space(6.0);
+                                self.picker_connection(ui);
+                                ui.add_space(16.0);
+
+                                if let Some(err) = self.picker.error.clone() {
+                                    egui::Frame::none()
+                                        .fill(rgb(0x2a1417))
+                                        .stroke(egui::Stroke::new(1.0, rgb(0x5b2026)))
+                                        .rounding(egui::Rounding::same(8.0))
+                                        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                                        .show(ui, |ui| {
+                                            ui.colored_label(rgb(0xf87171), format!("⚠  {err}"));
+                                        });
+                                    ui.add_space(10.0);
+                                }
+
+                                let ready = self.picker.flow.is_some()
+                                    && self.picker.cfg.is_some();
+                                ui.add_enabled_ui(ready, |ui| {
+                                    if primary_button(ui, "▶   Mulai Flow", colw).clicked() {
+                                        self.try_start();
+                                    }
+                                });
+                                if !ready {
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        egui::RichText::new("Pilih flow.mmd + flow.yaml dulu untuk memulai.")
+                                            .size(11.0)
+                                            .color(rgb(0x64748b)),
+                                    );
+                                }
+
+                                self.picker_recent(ui, colw);
+                                ui.add_space(40.0);
+                            });
+                        });
                     });
-                    out
-                };
+            });
+    }
 
-                if let Some(p) = pick_row(ui, "flow.mmd", &self.picker.flow, &["mmd"]) {
-                    self.picker.on_flow_picked(p);
-                }
-                if let Some(p) = pick_row(ui, "flow.yaml", &self.picker.cfg, &["yaml", "yml"]) {
-                    self.picker.cfg = Some(p);
-                    self.picker.reload_draft();
-                }
-                if let Some(p) = pick_row(ui, "env (opsional)", &self.picker.env, &["yaml", "yml"])
-                {
-                    self.picker.env = Some(p);
-                    self.picker.reload_draft();
-                }
+    /// Header hero: logo ⚡ besar + judul + tagline + garis aksen.
+    fn picker_hero(&self, ui: &mut egui::Ui, colw: f32) {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("⚡").size(34.0).color(accent()));
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("flowrun")
+                    .size(34.0)
+                    .strong()
+                    .color(rgb(0xf3f6fb)),
+            );
+            ui.add_space(8.0);
+            ui.add_space(1.0);
+            pill(ui, "v0.2", rgb(0x26304a), accent(), true);
+        });
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "Flow-runner visual — jalankan alur API multi-langkah, next-next atau auto.",
+            )
+            .size(13.5)
+            .color(rgb(0x8b95a7)),
+        );
+        ui.add_space(12.0);
+        // Garis aksen membulat.
+        let (bar, _) = ui.allocate_exact_size(egui::vec2(colw, 3.0), egui::Sense::hover());
+        let seg = egui::Rect::from_min_size(bar.left_top(), egui::vec2(132.0, 3.0));
+        ui.painter()
+            .rect_filled(seg, egui::Rounding::same(2.0), accent());
+        let rest = egui::Rect::from_min_max(
+            egui::pos2(seg.right() + 6.0, bar.top() + 1.0),
+            egui::pos2(bar.right(), bar.top() + 2.0),
+        );
+        ui.painter()
+            .rect_filled(rest, egui::Rounding::same(1.0), rgb(0x1e2536));
+    }
 
-                ui.add_space(10.0);
-                ui.separator();
-                ui.label(
-                    egui::RichText::new(
-                        "Koneksi (bisa diedit — hanya untuk sesi ini, tidak ditulis ke file)",
-                    )
-                    .strong(),
-                );
-                ui.add_space(4.0);
+    /// Kartu sumber flow: 3 baris pemilih file.
+    fn picker_sources(&mut self, ui: &mut egui::Ui) {
+        section_label(ui, "Sumber Flow");
+        card_lg(ui, |ui| {
+            #[derive(Clone, Copy)]
+            enum Slot {
+                Flow,
+                Cfg,
+                Env,
+            }
+            // (slot, ikon, label ringkas, filter dialog, ekstensi, nilai)
+            let rows: [(Slot, &str, &str, &str, &[&str], &Option<PathBuf>); 3] = [
+                (Slot::Flow, "📄", "Flow", "flow.mmd", &["mmd"], &self.picker.flow),
+                (Slot::Cfg, "⚙", "Config", "flow.yaml", &["yaml", "yml"], &self.picker.cfg),
+                (Slot::Env, "🔑", "Env", "env", &["yaml", "yml"], &self.picker.env),
+            ];
+            let mut picked: Option<(Slot, PathBuf)> = None;
+            for (i, (slot, icon, label, filter, exts, val)) in rows.iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(9.0);
+                }
                 ui.horizontal(|ui| {
-                    ui.label("base_url");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.picker.base_url)
-                            .desired_width(360.0)
-                            .hint_text("https://host-dev"),
+                    ui.label(egui::RichText::new(*icon).size(15.0));
+                    ui.add_space(4.0);
+                    ui.add_sized(
+                        [58.0, 22.0],
+                        egui::Label::new(
+                            egui::RichText::new(*label).strong().color(rgb(0xc9d2df)),
+                        )
+                        .selectable(false),
+                    );
+                    ui.add_space(4.0);
+                    match val {
+                        Some(p) => {
+                            let name = p
+                                .file_name()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            let dir = p
+                                .parent()
+                                .map(|d| d.display().to_string())
+                                .unwrap_or_default();
+                            ui.label(egui::RichText::new(name).monospace().color(rgb(0xe5e9f0)))
+                                .on_hover_text(p.display().to_string());
+                            ui.label(
+                                egui::RichText::new(dir)
+                                    .size(10.5)
+                                    .color(rgb(0x5c6678)),
+                            );
+                        }
+                        None => {
+                            let hint = if matches!(slot, Slot::Env) {
+                                "(opsional — token & base_url)"
+                            } else {
+                                "(belum dipilih)"
+                            };
+                            ui.label(egui::RichText::new(hint).italics().color(rgb(0x6b7688)));
+                        }
+                    }
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if ui.button("Pilih…").clicked() {
+                                let mut dlg = rfd::FileDialog::new();
+                                if !exts.is_empty() {
+                                    dlg = dlg.add_filter(*filter, exts);
+                                }
+                                if let Some(p) = dlg.pick_file() {
+                                    picked = Some((*slot, p));
+                                }
+                            }
+                        },
                     );
                 });
-                ui.checkbox(&mut self.picker.show_tokens, "tampilkan token");
-                let show = self.picker.show_tokens;
-                for (name, val) in &mut self.picker.tokens {
+            }
+            if let Some((slot, p)) = picked {
+                match slot {
+                    Slot::Flow => self.picker.on_flow_picked(p),
+                    Slot::Cfg => {
+                        self.picker.cfg = Some(p);
+                        self.picker.reload_draft();
+                    }
+                    Slot::Env => {
+                        self.picker.env = Some(p);
+                        self.picker.reload_draft();
+                    }
+                }
+            }
+        });
+    }
+
+    /// Kartu koneksi: base_url + token + vars.
+    fn picker_connection(&mut self, ui: &mut egui::Ui) {
+        section_label(ui, "Koneksi");
+        card_lg(ui, |ui| {
+            ui.label(
+                egui::RichText::new("Hanya untuk sesi ini — tidak ditulis ke file.")
+                    .size(11.0)
+                    .color(rgb(0x64748b)),
+            );
+            ui.add_space(12.0);
+            // Lebar kolom label SERAGAM untuk base_url / token / vars agar semua
+            // field mulai di x yang sama. Label kiri-rata (bukan centered).
+            const LBL_W: f32 = 150.0;
+            let lbl = |ui: &mut egui::Ui, text: egui::RichText| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(LBL_W, 24.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.add(egui::Label::new(text).selectable(false));
+                    },
+                );
+            };
+
+            ui.horizontal(|ui| {
+                lbl(ui, egui::RichText::new("base_url").color(rgb(0xa7b0be)));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.picker.base_url)
+                        .desired_width(ui.available_width())
+                        .hint_text("https://host-dev"),
+                );
+            });
+            ui.add_space(10.0);
+            ui.checkbox(&mut self.picker.show_tokens, "tampilkan token");
+            let show = self.picker.show_tokens;
+            for (name, val) in &mut self.picker.tokens {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    lbl(
+                        ui,
+                        egui::RichText::new(format!("token {name}")).color(rgb(0xa7b0be)),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(val)
+                            .password(!show)
+                            .desired_width(ui.available_width())
+                            .hint_text("eyJ…"),
+                    );
+                });
+            }
+
+            // ---- vars seed: toggle manual (tanpa indent collapsing) ----
+            ui.add_space(12.0);
+            let arrow = if self.picker.vars_open { "▾" } else { "▸" };
+            if ui
+                .add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("{arrow}  vars seed"))
+                            .color(rgb(0x9aa4b4)),
+                    )
+                    .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                self.picker.vars_open = !self.picker.vars_open;
+            }
+
+            if self.picker.vars_open {
+                ui.add_space(8.0);
+                let mut del: Option<usize> = None;
+                for (i, (k, v)) in self.picker.vars.iter_mut().enumerate() {
+                    if i > 0 {
+                        ui.add_space(6.0);
+                    }
                     ui.horizontal(|ui| {
-                        ui.label(format!("token {name}"));
-                        ui.add(
-                            egui::TextEdit::singleline(val)
-                                .password(!show)
-                                .desired_width(360.0)
-                                .hint_text("eyJ…"),
+                        lbl(ui, egui::RichText::new(k.as_str()).monospace());
+                        // 🗑 dikunci ke kanan; field mengisi sisa → lebar &
+                        // posisi ikon identik antar-baris.
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if ui.small_button("🗑").clicked() {
+                                    del = Some(i);
+                                }
+                                ui.add_space(4.0);
+                                ui.add(
+                                    egui::TextEdit::singleline(v)
+                                        .desired_width(ui.available_width()),
+                                );
+                            },
                         );
                     });
                 }
-                ui.add_space(4.0);
-                ui.collapsing("vars", |ui| {
-                    let mut del: Option<usize> = None;
-                    for (i, (k, v)) in self.picker.vars.iter_mut().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.monospace(k.as_str());
-                            ui.add(egui::TextEdit::singleline(v).desired_width(280.0));
-                            if ui.small_button("🗑").clicked() {
-                                del = Some(i);
-                            }
-                        });
+                if let Some(i) = del {
+                    self.picker.vars.remove(i);
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [LBL_W, 24.0],
+                        egui::TextEdit::singleline(&mut self.picker.new_var_k)
+                            .hint_text("kunci"),
+                    );
+                    let mut do_add = false;
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            do_add = ui.button("+ tambah").clicked();
+                            ui.add_space(4.0);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.picker.new_var_v)
+                                    .desired_width(ui.available_width())
+                                    .hint_text("nilai"),
+                            );
+                        },
+                    );
+                    if do_add && !self.picker.new_var_k.trim().is_empty() {
+                        self.picker.vars.push((
+                            self.picker.new_var_k.trim().to_string(),
+                            self.picker.new_var_v.clone(),
+                        ));
+                        self.picker.new_var_k.clear();
+                        self.picker.new_var_v.clear();
                     }
-                    if let Some(i) = del {
-                        self.picker.vars.remove(i);
-                    }
+                });
+            }
+        });
+    }
+
+    /// Daftar flow terakhir dibuka — kartu klik.
+    fn picker_recent(&mut self, ui: &mut egui::Ui, colw: f32) {
+        if self.picker.recent.is_empty() {
+            return;
+        }
+        ui.add_space(10.0);
+        section_label(ui, "Terakhir Dibuka");
+        let recents = self.picker.recent.clone();
+        for r in recents {
+            let name = r
+                .flow
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let dir = r
+                .flow
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let resp = egui::Frame::none()
+                .fill(rgb(0x161b27))
+                .stroke(egui::Stroke::new(1.0, rgb(0x242c3d)))
+                .rounding(egui::Rounding::same(10.0))
+                .inner_margin(egui::Margin::symmetric(14.0, 11.0))
+                .outer_margin(egui::Margin::symmetric(0.0, 4.0))
+                .show(ui, |ui| {
+                    ui.set_width(colw - 30.0);
                     ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.picker.new_var_k)
-                                .desired_width(120.0)
-                                .hint_text("kunci"),
-                        );
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.picker.new_var_v)
-                                .desired_width(200.0)
-                                .hint_text("nilai"),
-                        );
-                        if ui.button("+ tambah").clicked()
-                            && !self.picker.new_var_k.trim().is_empty()
-                        {
-                            self.picker.vars.push((
-                                self.picker.new_var_k.trim().to_string(),
-                                self.picker.new_var_v.clone(),
-                            ));
-                            self.picker.new_var_k.clear();
-                            self.picker.new_var_v.clear();
-                        }
+                        ui.label(egui::RichText::new("📂").size(15.0));
+                        ui.add_space(2.0);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(&name).strong().color(rgb(0xe5e9f0)),
+                            );
+                            ui.label(
+                                egui::RichText::new(&dir).size(10.5).color(rgb(0x5c6678)),
+                            );
+                        });
                     });
                 });
-
-                ui.add_space(10.0);
-                if let Some(err) = &self.picker.error {
-                    ui.colored_label(rgb(0xef4444), err);
-                }
-                if ui
-                    .add(
-                        egui::Button::new(egui::RichText::new("▶ Mulai").strong())
-                            .min_size(egui::vec2(120.0, 32.0)),
-                    )
-                    .clicked()
-                {
-                    self.try_start();
-                }
-
-                if !self.picker.recent.is_empty() {
-                    ui.add_space(14.0);
-                    ui.separator();
-                    ui.label(egui::RichText::new("Terakhir dibuka").strong());
-                    let recents = self.picker.recent.clone();
-                    for r in recents {
-                        let name = r
-                            .flow
-                            .file_name()
-                            .map(|s| s.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        let dir = r
-                            .flow
-                            .parent()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default();
-                        if ui.button(format!("📂 {name} — {dir}")).clicked() {
-                            self.picker.flow = Some(r.flow.clone());
-                            self.picker.cfg = Some(r.cfg.clone());
-                            self.picker.env = r.env.clone();
-                            self.picker.reload_draft();
-                        }
-                    }
-                }
-            });
-        });
+            let r_int = resp.response.interact(egui::Sense::click());
+            if r_int.hovered() {
+                ui.painter().rect_stroke(
+                    r_int.rect,
+                    egui::Rounding::same(9.0),
+                    egui::Stroke::new(1.2, accent()),
+                );
+                ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+            }
+            if r_int.clicked() {
+                self.picker.flow = Some(r.flow.clone());
+                self.picker.cfg = Some(r.cfg.clone());
+                self.picker.env = r.env.clone();
+                self.picker.reload_draft();
+            }
+        }
     }
 }
 
@@ -1954,6 +2312,14 @@ fn main() -> anyhow::Result<()> {
         viewport: egui::ViewportBuilder::default().with_inner_size([1220.0, 700.0]),
         ..Default::default()
     };
-    eframe::run_native("flowrun", native, Box::new(|_cc| Ok(Box::new(app))))
-        .map_err(|e| anyhow::anyhow!("eframe: {e}"))
+    eframe::run_native(
+        "flowrun",
+        native,
+        Box::new(|cc| {
+            apply_fonts(&cc.egui_ctx);
+            apply_theme(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
+    )
+    .map_err(|e| anyhow::anyhow!("eframe: {e}"))
 }
