@@ -363,14 +363,32 @@ fn build_geometry(
         LayoutDir::LR | LayoutDir::Snake => flowmaid::model::Direction::LR,
         LayoutDir::TD => flowmaid::model::Direction::TD,
     };
-    let sc = flowmaid::scene::scene(&graph);
+    // Snake = lipat rantai linear jadi beberapa band serpentine agar muat layar.
+    // flowmaid ≥0.18 mengerjakannya via fold::scene_compact (DP ala Knuth-Plass +
+    // routing U-turn bawaan); hasilnya `Scene` biasa yang dipetakan sama seperti
+    // layout normal. Bila tak menguntungkan/tak linear, fold balik ke `scene()`
+    // datar (`skipped`) — tetap ter-handle mulus.
+    let sc = if dir == LayoutDir::Snake {
+        // CompactOptions #[non_exhaustive] → konstruksi lewat konstruktor.
+        let opts = flowmaid::fold::CompactOptions::for_extent(SNAKE_BUDGET_PX);
+        flowmaid::fold::scene_compact(&graph, &opts).scene
+    } else {
+        flowmaid::scene::scene(&graph)
+    };
+    Ok(scene_to_geometry(&sc, node_to_step))
+}
 
-    if dir == LayoutDir::Snake {
-        return Ok(snake_layout(&sc, node_to_step));
-    }
+/// Budget lebar (px, sumbu-alir LR) untuk Snake: fold melipat rantai jadi band
+/// baru begitu satu band melampaui ini. ~1600 ≈ kepadatan grid Snake lama.
+const SNAKE_BUDGET_PX: f64 = 1600.0;
 
-    // Peta by-id: flowmaid ≥0.18 menaruh `id` di SceneNode dan `from`/`to` di
-    // SceneEdge, jadi tak lagi bergantung `sc.nodes[i]` sejajar `graph.nodes[i]`.
+/// Petakan `flowmaid::scene::Scene` → `Geometry` flowrun. by-id (≥0.18): node
+/// via `SceneNode.id`, sumber edge via `SceneEdge.from` — tak bergantung indeks.
+/// Dipakai layout normal (LR/TD) maupun hasil fold (Snake).
+fn scene_to_geometry(
+    sc: &flowmaid::scene::Scene,
+    node_to_step: &HashMap<String, usize>,
+) -> Geometry {
     let nodes = sc
         .nodes
         .iter()
@@ -397,90 +415,11 @@ fn build_geometry(
             (pts, src_step)
         })
         .collect();
-    Ok(Geometry {
+    Geometry {
         nodes,
         edges,
         w: sc.width as f32,
         h: sc.height as f32,
-    })
-}
-
-/// Layout ular untuk rantai linear: grid serpentine (baris genap →, baris
-/// ganjil ←) + konektor siku antar-baris. Ukuran node diambil dari flowmaid
-/// scene (intrinsic size), posisi dihitung di sini.
-fn snake_layout(
-    sc: &flowmaid::scene::Scene,
-    node_to_step: &HashMap<String, usize>,
-) -> Geometry {
-    let n = sc.nodes.len();
-    // Urutan eksekusi: step index → indeks scene-node (peta by-id, ≥0.18).
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by_key(|&i| {
-        node_to_step
-            .get(&sc.nodes[i].id)
-            .copied()
-            .unwrap_or(usize::MAX)
-    });
-
-    // Kolom: mendekati aspek layar lebar; 14 node → 5 kolom (3 baris).
-    let cols = ((n as f32 * 1.6).sqrt().ceil() as usize).max(2);
-    let max_w = sc.nodes.iter().map(|s| s.w).fold(60.0, f64::max) as f32;
-    let max_h = sc.nodes.iter().map(|s| s.h).fold(28.0, f64::max) as f32;
-    let (gap_x, gap_y) = (56.0f32, 64.0f32);
-    let (cell_w, cell_h) = (max_w + gap_x, max_h + gap_y);
-
-    let mut nodes: Vec<SceneNodeG> = Vec::with_capacity(n);
-    let mut centers: Vec<egui::Pos2> = Vec::with_capacity(n); // urut step
-    for (k, &si) in order.iter().enumerate() {
-        let row = k / cols;
-        let col_in = k % cols;
-        // Serpentine: baris ganjil dibalik arah kolomnya.
-        let col = if row.is_multiple_of(2) {
-            col_in
-        } else {
-            cols - 1 - col_in
-        };
-        let c = egui::pos2(
-            col as f32 * cell_w + cell_w / 2.0,
-            row as f32 * cell_h + cell_h / 2.0,
-        );
-        centers.push(c);
-        let s = &sc.nodes[si];
-        nodes.push(SceneNodeG {
-            step: *node_to_step.get(&s.id).unwrap_or(&0),
-            center: c,
-            size: egui::vec2(s.w as f32, s.h as f32),
-            label: s.label.clone(),
-        });
-    }
-
-    // Konektor: sesama baris = garis horizontal antar tepi box; pindah baris
-    // (posisi kolom sama) = garis vertikal turun.
-    let mut edges: Vec<(Vec<egui::Pos2>, usize)> = Vec::new();
-    for k in 0..n.saturating_sub(1) {
-        let (a, b) = (centers[k], centers[k + 1]);
-        let (sa, sb) = (nodes[k].size, nodes[k + 1].size);
-        let pts = if (a.y - b.y).abs() < 1.0 {
-            let dirx = (b.x - a.x).signum();
-            vec![
-                egui::pos2(a.x + dirx * sa.x / 2.0, a.y),
-                egui::pos2(b.x - dirx * sb.x / 2.0, b.y),
-            ]
-        } else {
-            vec![
-                egui::pos2(a.x, a.y + sa.y / 2.0),
-                egui::pos2(b.x, b.y - sb.y / 2.0),
-            ]
-        };
-        edges.push((pts, k));
-    }
-
-    let rows = n.div_ceil(cols);
-    Geometry {
-        nodes,
-        edges,
-        w: cols as f32 * cell_w,
-        h: rows as f32 * cell_h,
     }
 }
 
