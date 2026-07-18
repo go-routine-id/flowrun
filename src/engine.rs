@@ -349,7 +349,16 @@ fn execute(
         .split_once(' ')
         .with_context(|| format!("request harus `METHOD /path`: {request}"))?;
     let method: reqwest::Method = method.trim().parse().context("HTTP method tidak dikenal")?;
-    let url = format!("{}{}", ctx.base_url, template(path.trim(), &ctx.vars)?);
+    // Path absolut (mis. `{{payment_base}}/...` menuju service lain) dipakai apa
+    // adanya — base_url TIDAK di-prepend. Ini yang memungkinkan satu flow menembus
+    // >1 service (mis. wacca-service + payment-service) tanpa hardcode host: host
+    // service kedua datang dari var env file.
+    let rendered = template(path.trim(), &ctx.vars)?;
+    let url = if rendered.starts_with("http://") || rendered.starts_with("https://") {
+        rendered
+    } else {
+        format!("{}{}", ctx.base_url, rendered)
+    };
     let request_line = format!("{method} {url}");
 
     let mut req = client.request(method.clone(), &url);
