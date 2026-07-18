@@ -366,15 +366,16 @@ fn build_geometry(
     let sc = flowmaid::scene::scene(&graph);
 
     if dir == LayoutDir::Snake {
-        return Ok(snake_layout(&graph, &sc, node_to_step));
+        return Ok(snake_layout(&sc, node_to_step));
     }
 
+    // Peta by-id: flowmaid ≥0.18 menaruh `id` di SceneNode dan `from`/`to` di
+    // SceneEdge, jadi tak lagi bergantung `sc.nodes[i]` sejajar `graph.nodes[i]`.
     let nodes = sc
         .nodes
         .iter()
-        .enumerate()
-        .map(|(i, n)| SceneNodeG {
-            step: *node_to_step.get(&graph.nodes[i].id).unwrap_or(&0),
+        .map(|n| SceneNodeG {
+            step: *node_to_step.get(&n.id).unwrap_or(&0),
             center: egui::pos2(n.x as f32, n.y as f32),
             size: egui::vec2(n.w as f32, n.h as f32),
             label: n.label.clone(),
@@ -383,8 +384,7 @@ fn build_geometry(
     let edges = sc
         .edges
         .iter()
-        .enumerate()
-        .map(|(k, e)| {
+        .map(|e| {
             let pts: Vec<egui::Pos2> = if e.waypoints.len() >= 2 {
                 e.waypoints
                     .iter()
@@ -393,11 +393,7 @@ fn build_geometry(
             } else {
                 sample_bezier(&e.bezier, 18)
             };
-            let src_step = graph
-                .edges
-                .get(k)
-                .and_then(|ge| node_to_step.get(&graph.nodes[ge.from].id).copied())
-                .unwrap_or(usize::MAX);
+            let src_step = node_to_step.get(&e.from).copied().unwrap_or(usize::MAX);
             (pts, src_step)
         })
         .collect();
@@ -413,16 +409,15 @@ fn build_geometry(
 /// ganjil ←) + konektor siku antar-baris. Ukuran node diambil dari flowmaid
 /// scene (intrinsic size), posisi dihitung di sini.
 fn snake_layout(
-    graph: &flowmaid::model::Graph,
     sc: &flowmaid::scene::Scene,
     node_to_step: &HashMap<String, usize>,
 ) -> Geometry {
     let n = sc.nodes.len();
-    // Urutan eksekusi: step index → indeks scene-node.
+    // Urutan eksekusi: step index → indeks scene-node (peta by-id, ≥0.18).
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by_key(|&i| {
         node_to_step
-            .get(&graph.nodes[i].id)
+            .get(&sc.nodes[i].id)
             .copied()
             .unwrap_or(usize::MAX)
     });
@@ -452,7 +447,7 @@ fn snake_layout(
         centers.push(c);
         let s = &sc.nodes[si];
         nodes.push(SceneNodeG {
-            step: *node_to_step.get(&graph.nodes[si].id).unwrap_or(&0),
+            step: *node_to_step.get(&s.id).unwrap_or(&0),
             center: c,
             size: egui::vec2(s.w as f32, s.h as f32),
             label: s.label.clone(),

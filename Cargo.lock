@@ -131,7 +131,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
  "x11rb",
 ]
 
@@ -995,9 +995,9 @@ dependencies = [
 
 [[package]]
 name = "flowmaid"
-version = "0.17.0"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5aca814a4c49d35c2104e5edbe9d51f0a40110ba317604de19b555d78861c3ca"
+checksum = "3392a40ff27a00e8e7a4b7671556dff3944aba457003d79fee908feec1f2fceb"
 
 [[package]]
 name = "flowrun"
@@ -2605,7 +2605,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
