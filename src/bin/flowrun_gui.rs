@@ -979,27 +979,29 @@ fn apply_fonts(ctx: &egui::Context) {
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",      // Linux
         "C:/Windows/Fonts/arial.ttf",                           // Windows
     ];
-    let mut bytes = None;
-    for p in CANDIDATES {
+    // Muat SEMUA kandidat yang ada, bukan berhenti di font pertama: cakupan glyph =
+    // GABUNGAN semua font. Di macOS, Arial Unicode (BMP luas) sendiri tak punya
+    // sebagian panah (mis. ⤢ U+2922 tombol Fit) — Apple Symbols menutup celah itu.
+    let mut fonts = egui::FontDefinitions::default();
+    let mut keys = Vec::new();
+    for (i, p) in CANDIDATES.iter().enumerate() {
         if let Ok(b) = std::fs::read(p) {
-            bytes = Some(b);
-            break;
+            let key = format!("flowrun_fallback_{i}");
+            fonts
+                .font_data
+                .insert(key.clone(), egui::FontData::from_owned(b));
+            keys.push(key);
         }
     }
-    let Some(bytes) = bytes else { return };
-
-    let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        "flowrun_fallback".to_owned(),
-        egui::FontData::from_owned(bytes),
-    );
-    // Tempel sebagai fallback TERAKHIR untuk kedua family.
+    if keys.is_empty() {
+        return;
+    }
+    // Tempel semua sebagai fallback TERAKHIR (urut kandidat) untuk kedua family.
     for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts
-            .families
-            .entry(fam)
-            .or_default()
-            .push("flowrun_fallback".to_owned());
+        let list = fonts.families.entry(fam).or_default();
+        for key in &keys {
+            list.push(key.clone());
+        }
     }
     ctx.set_fonts(fonts);
 }
