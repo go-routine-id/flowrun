@@ -433,7 +433,9 @@ fn execute(
         match dot_get(&body, key) {
             Some(actual) if value_to_var(actual) == expected => {}
             Some(actual) => failures.push(format!("{key} = {} ≠ {expected}", value_to_var(actual))),
-            None => failures.push(format!("{key}: not found in response (expected {expected})")),
+            None => failures.push(format!(
+                "{key}: not found in response (expected {expected})"
+            )),
         }
     }
     // Tanpa assert status eksplisit → wajib 2xx (default aman untuk mode test).
