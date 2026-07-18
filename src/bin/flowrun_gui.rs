@@ -352,7 +352,7 @@ fn build_geometry(
     mermaid_src: &str,
     node_to_step: &HashMap<String, usize>,
     dir: LayoutDir,
-) -> anyhow::Result<Geometry> {
+) -> anyhow::Result<(Geometry, flowmaid::scene::Scene, flowmaid::model::Graph)> {
     let mut graph = match flowmaid::parser::parse_document(mermaid_src)
         .map_err(|e| anyhow::anyhow!("parse: {e:?}"))?
     {
@@ -375,7 +375,8 @@ fn build_geometry(
     } else {
         flowmaid::scene::scene(&graph)
     };
-    Ok(scene_to_geometry(&sc, node_to_step))
+    // Kembalikan Scene (hit_test klik) + Graph (route_partial saat drag node).
+    Ok((scene_to_geometry(&sc, node_to_step), sc, graph))
 }
 
 /// Budget lebar (px, sumbu-alir LR) untuk Snake: fold melipat rantai jadi band
@@ -499,7 +500,16 @@ struct Session {
     started: Instant,
     tx: Sender<Cmd>,
     rx: Receiver<Evt>,
-    hitboxes: Vec<(usize, egui::Rect)>,
+    /// Scene flowmaid terkini (bisa hasil drag) — sumber `Scene::hit_test` saat
+    /// klik kanvas (pilih node/edge). Menggantikan bookkeeping hitbox manual.
+    scene: flowmaid::scene::Scene,
+    /// Untuk drag-and-drop node (≥0.19): graf + layout dasar (immutable) +
+    /// center kerja (di-override saat drag). `route_partial` me-reroute HANYA
+    /// edge yang terpengaruh, relatif ke `base_scene`. Ephemeral (tak persist).
+    graph: flowmaid::model::Graph,
+    base_scene: flowmaid::scene::Scene,
+    centers: Vec<(f64, f64)>,
+    drag: Option<usize>,
     zoom: f32,
     pan: egui::Vec2,
     fitted: bool,
@@ -546,7 +556,9 @@ impl Session {
         } else {
             LayoutDir::TD
         };
-        let geo = build_geometry(&parsed.mermaid_src, &node_to_step, dir)?;
+        let (geo, scene, graph) = build_geometry(&parsed.mermaid_src, &node_to_step, dir)?;
+        let centers: Vec<(f64, f64)> = scene.nodes.iter().map(|n| (n.x, n.y)).collect();
+        let base_scene = scene.clone();
         let meta: Vec<StepMeta> = parsed
             .steps
             .iter()
@@ -592,7 +604,11 @@ impl Session {
             started: Instant::now(),
             tx: cmd_tx,
             rx: evt_rx,
-            hitboxes: Vec::new(),
+            scene,
+            graph,
+            base_scene,
+            centers,
+            drag: None,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             fitted: false,
@@ -721,10 +737,29 @@ impl Session {
             return; // Ular hanya utk rantai linear
         }
         self.dir = dir;
-        if let Ok(g) = build_geometry(&self.mermaid_src, &self.node_to_step, self.dir) {
+        if let Ok((g, sc, graph)) = build_geometry(&self.mermaid_src, &self.node_to_step, self.dir) {
+            self.centers = sc.nodes.iter().map(|n| (n.x, n.y)).collect();
+            self.base_scene = sc.clone();
             self.geo = g;
+            self.scene = sc;
+            self.graph = graph;
+            self.drag = None;
             self.fitted = false;
         }
+    }
+
+    /// Re-route setelah drag: `route_partial` memindah node yang ditarik dan
+    /// HANYA me-reroute edge yang menyentuhnya (edge lain tetap dari base_scene).
+    fn rebuild_dragged(&mut self) {
+        let base_centers: Vec<(f64, f64)> =
+            self.base_scene.nodes.iter().map(|n| (n.x, n.y)).collect();
+        self.scene = flowmaid::scene::route_partial(
+            &self.graph,
+            &self.centers,
+            &self.base_scene,
+            &base_centers,
+        );
+        self.geo = scene_to_geometry(&self.scene, &self.node_to_step);
     }
 }
 
@@ -2135,9 +2170,34 @@ impl App {
                     sess.follow = false;
                 }
             }
+            // Drag: mulai di atas node → geser NODE (route_partial); area kosong → pan.
+            if resp.drag_started()
+                && let Some(pos) = resp.interact_pointer_pos()
+            {
+                let sp = (pos - rect.min - sess.pan) / sess.zoom;
+                let tol = (6.0 / sess.zoom) as f64;
+                let hit = sess.scene.hit_test(sp.x as f64, sp.y as f64, tol);
+                if let Some(flowmaid::scene::Hit::Node(i)) = hit {
+                    sess.selected = sess.node_to_step.get(&sess.scene.nodes[i].id).copied();
+                    sess.drag = Some(i);
+                } else {
+                    sess.drag = None;
+                }
+            }
             if resp.dragged() {
-                sess.pan += resp.drag_delta();
-                sess.follow = false;
+                if let Some(ni) = sess.drag {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let sp = (pos - rect.min - sess.pan) / sess.zoom;
+                        sess.centers[ni] = (sp.x as f64, sp.y as f64);
+                        sess.rebuild_dragged();
+                    }
+                } else {
+                    sess.pan += resp.drag_delta();
+                    sess.follow = false;
+                }
+            }
+            if resp.drag_stopped() {
+                sess.drag = None;
             }
             if !ui.ctx().wants_keyboard_input() {
                 let (fit_key, hundred) = ui.input(|i| {
@@ -2193,12 +2253,10 @@ impl App {
             }
 
             // nodes
-            sess.hitboxes.clear();
             for sn in &sess.geo.nodes {
                 let c = tf(sn.center);
                 let size = sn.size * zoom;
                 let r = egui::Rect::from_center_size(c, size);
-                sess.hitboxes.push((sn.step, r));
                 let st = sess.states[sn.step];
                 let role = sess.meta[sn.step].role;
                 let mut fill = Self::state_color(st, role);
@@ -2285,11 +2343,21 @@ impl App {
             if resp.clicked()
                 && let Some(pos) = resp.interact_pointer_pos()
             {
-                for (step, hb) in sess.hitboxes.iter().rev() {
-                    if hb.contains(pos) {
-                        sess.selected = Some(*step);
-                        break;
+                // Layar → scene (invers tf `base + p*zoom`), lalu hit-test flowmaid
+                // (shape-precise node + curve-accurate edge). tol ~6px di scene-unit.
+                let sp = (pos - base) / zoom;
+                let tol = (6.0 / zoom) as f64;
+                match sess.scene.hit_test(sp.x as f64, sp.y as f64, tol) {
+                    Some(flowmaid::scene::Hit::Node(i)) => {
+                        let step = sess.node_to_step.get(&sess.scene.nodes[i].id).copied();
+                        sess.selected = step;
                     }
+                    Some(flowmaid::scene::Hit::Edge(i)) => {
+                        // Klik konektor → pilih step SUMBER-nya (inspeksi transisi).
+                        let step = sess.node_to_step.get(&sess.scene.edges[i].from).copied();
+                        sess.selected = step;
+                    }
+                    _ => {}
                 }
             }
         });
