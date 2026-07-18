@@ -50,6 +50,12 @@ steps:
     request: PATCH /api/v1/tenant/order-list/{{order_list_id}}/set-final-quantity
     body: { final_quantity: 3.5, actual_pcs: 6, note: "timbang (flowrun)" }
 
+  n05v:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/verify-complete
+    body: {}
+    note: gate verifikasi owner — wajib sebelum final-price (backend 409 kalau dilewati)
+
   n06:
     auth: owner
     request: POST /api/v1/tenant/orders/{{order_id}}/final-price
@@ -72,9 +78,26 @@ steps:
     request: POST /api/v1/tenant/orders/{{order_id}}/confirm-cod
     body: {}
 
+  nPaySim:
+    auth: customer
+    request: POST {{payment_base}}/api/v1/tools/doku-va/simulate-paid
+    body: { reference_id: "{{order_id}}" }
+    assert: { status: 2xx }
+    note: >
+      jalur digital — settle charge VA lewat JALUR WEBHOOK DOKU (dev simulator di
+      payment-service, base_url kedua {{payment_base}}). reference_id = order_id.
+      Charge dibuat saat add-payment-method (n08). HTTP 200 = payment.paid ter-emit.
+
   n11:
     auth: owner
     request: PATCH /api/v1/tenant/order-list/{{order_list_id}}/status-finished
+
+  nAdv:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/advance
+    body: { target: ready_pickup }
+    assert: { "data.status": ready_pickup }
+    note: baris selesai tak otomatis memajukan order; owner menandai siap-ambil
 
   n12:
     auth: customer
