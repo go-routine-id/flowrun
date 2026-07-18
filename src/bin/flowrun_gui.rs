@@ -591,7 +591,9 @@ impl Session {
         for p in &flow_cfg.auth_profiles {
             match env.tokens.get(p) {
                 Some(t) if !t.trim().is_empty() => {}
-                _ => anyhow::bail!("token for profile '{p}' is empty — set it in the connection panel"),
+                _ => anyhow::bail!(
+                    "token for profile '{p}' is empty — set it in the connection panel"
+                ),
             }
         }
         let base_url = env.base_url.trim_end_matches('/').to_string();
@@ -1067,7 +1069,10 @@ fn apply_theme(ctx: &egui::Context) {
     v.widgets.hovered.rounding = round;
     v.widgets.hovered.bg_fill = rgb(0x232b3c);
     v.widgets.hovered.weak_bg_fill = rgb(0x232b3c);
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.2, egui::Color32::from_rgba_unmultiplied(0xf5, 0xb8, 0x3d, 150));
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(
+        1.2,
+        egui::Color32::from_rgba_unmultiplied(0xf5, 0xb8, 0x3d, 150),
+    );
     v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, rgb(0xf0f4fa));
 
     v.widgets.active.rounding = round;
@@ -1082,11 +1087,23 @@ fn apply_theme(ctx: &egui::Context) {
 
     use egui::{FontFamily, FontId, TextStyle};
     style.text_styles = [
-        (TextStyle::Heading, FontId::new(24.0, FontFamily::Proportional)),
+        (
+            TextStyle::Heading,
+            FontId::new(24.0, FontFamily::Proportional),
+        ),
         (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
-        (TextStyle::Button, FontId::new(14.0, FontFamily::Proportional)),
-        (TextStyle::Monospace, FontId::new(12.5, FontFamily::Monospace)),
-        (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
+        (
+            TextStyle::Button,
+            FontId::new(14.0, FontFamily::Proportional),
+        ),
+        (
+            TextStyle::Monospace,
+            FontId::new(12.5, FontFamily::Monospace),
+        ),
+        (
+            TextStyle::Small,
+            FontId::new(11.0, FontFamily::Proportional),
+        ),
     ]
     .into();
     ctx.set_style(style);
@@ -1290,8 +1307,7 @@ impl App {
                                     ui.add_space(10.0);
                                 }
 
-                                let ready = self.picker.flow.is_some()
-                                    && self.picker.cfg.is_some();
+                                let ready = self.picker.flow.is_some() && self.picker.cfg.is_some();
                                 ui.add_enabled_ui(ready, |ui| {
                                     if primary_button(ui, "▶   Mulai Flow", colw).clicked() {
                                         self.try_start();
@@ -1300,9 +1316,11 @@ impl App {
                                 if !ready {
                                     ui.add_space(4.0);
                                     ui.label(
-                                        egui::RichText::new("Select flow.mmd + flow.yaml to begin.")
-                                            .size(11.0)
-                                            .color(rgb(0x64748b)),
+                                        egui::RichText::new(
+                                            "Select flow.mmd + flow.yaml to begin.",
+                                        )
+                                        .size(11.0)
+                                        .color(rgb(0x64748b)),
                                     );
                                 }
 
@@ -1363,9 +1381,30 @@ impl App {
             }
             // (slot, ikon, label ringkas, filter dialog, ekstensi, nilai)
             let rows: [(Slot, &str, &str, &str, &[&str], &Option<PathBuf>); 3] = [
-                (Slot::Flow, "📄", "Flow", "flow.mmd", &["mmd"], &self.picker.flow),
-                (Slot::Cfg, "⚙", "Config", "flow.yaml", &["yaml", "yml"], &self.picker.cfg),
-                (Slot::Env, "🔑", "Env", "env", &["yaml", "yml"], &self.picker.env),
+                (
+                    Slot::Flow,
+                    "📄",
+                    "Flow",
+                    "flow.mmd",
+                    &["mmd"],
+                    &self.picker.flow,
+                ),
+                (
+                    Slot::Cfg,
+                    "⚙",
+                    "Config",
+                    "flow.yaml",
+                    &["yaml", "yml"],
+                    &self.picker.cfg,
+                ),
+                (
+                    Slot::Env,
+                    "🔑",
+                    "Env",
+                    "env",
+                    &["yaml", "yml"],
+                    &self.picker.env,
+                ),
             ];
             let mut picked: Option<(Slot, PathBuf)> = None;
             for (i, (slot, icon, label, filter, exts, val)) in rows.iter().enumerate() {
@@ -1377,10 +1416,8 @@ impl App {
                     ui.add_space(4.0);
                     ui.add_sized(
                         [58.0, 22.0],
-                        egui::Label::new(
-                            egui::RichText::new(*label).strong().color(rgb(0xc9d2df)),
-                        )
-                        .selectable(false),
+                        egui::Label::new(egui::RichText::new(*label).strong().color(rgb(0xc9d2df)))
+                            .selectable(false),
                     );
                     ui.add_space(4.0);
                     match val {
@@ -1395,11 +1432,7 @@ impl App {
                                 .unwrap_or_default();
                             ui.label(egui::RichText::new(name).monospace().color(rgb(0xe5e9f0)))
                                 .on_hover_text(p.display().to_string());
-                            ui.label(
-                                egui::RichText::new(dir)
-                                    .size(10.5)
-                                    .color(rgb(0x5c6678)),
-                            );
+                            ui.label(egui::RichText::new(dir).size(10.5).color(rgb(0x5c6678)));
                         }
                         None => {
                             let hint = if matches!(slot, Slot::Env) {
@@ -1410,20 +1443,17 @@ impl App {
                             ui.label(egui::RichText::new(hint).italics().color(rgb(0x6b7688)));
                         }
                     }
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if ui.button("Select…").clicked() {
-                                let mut dlg = rfd::FileDialog::new();
-                                if !exts.is_empty() {
-                                    dlg = dlg.add_filter(*filter, exts);
-                                }
-                                if let Some(p) = dlg.pick_file() {
-                                    picked = Some((*slot, p));
-                                }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Select…").clicked() {
+                            let mut dlg = rfd::FileDialog::new();
+                            if !exts.is_empty() {
+                                dlg = dlg.add_filter(*filter, exts);
                             }
-                        },
-                    );
+                            if let Some(p) = dlg.pick_file() {
+                                picked = Some((*slot, p));
+                            }
+                        }
+                    });
                 });
             }
             if let Some((slot, p)) = picked {
@@ -1498,8 +1528,7 @@ impl App {
             if ui
                 .add(
                     egui::Label::new(
-                        egui::RichText::new(format!("{arrow}  vars seed"))
-                            .color(rgb(0x9aa4b4)),
+                        egui::RichText::new(format!("{arrow}  vars seed")).color(rgb(0x9aa4b4)),
                     )
                     .sense(egui::Sense::click()),
                 )
@@ -1520,19 +1549,15 @@ impl App {
                         lbl(ui, egui::RichText::new(k.as_str()).monospace());
                         // 🗑 dikunci ke kanan; field mengisi sisa → lebar &
                         // posisi ikon identik antar-baris.
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui.small_button("🗑").clicked() {
-                                    del = Some(i);
-                                }
-                                ui.add_space(4.0);
-                                ui.add(
-                                    egui::TextEdit::singleline(v)
-                                        .desired_width(ui.available_width()),
-                                );
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("🗑").clicked() {
+                                del = Some(i);
+                            }
+                            ui.add_space(4.0);
+                            ui.add(
+                                egui::TextEdit::singleline(v).desired_width(ui.available_width()),
+                            );
+                        });
                     });
                 }
                 if let Some(i) = del {
@@ -1542,22 +1567,18 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.add_sized(
                         [LBL_W, 24.0],
-                        egui::TextEdit::singleline(&mut self.picker.new_var_k)
-                            .hint_text("key"),
+                        egui::TextEdit::singleline(&mut self.picker.new_var_k).hint_text("key"),
                     );
                     let mut do_add = false;
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            do_add = ui.button("+ add").clicked();
-                            ui.add_space(4.0);
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.picker.new_var_v)
-                                    .desired_width(ui.available_width())
-                                    .hint_text("value"),
-                            );
-                        },
-                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        do_add = ui.button("+ add").clicked();
+                        ui.add_space(4.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.picker.new_var_v)
+                                .desired_width(ui.available_width())
+                                .hint_text("value"),
+                        );
+                    });
                     if do_add && !self.picker.new_var_k.trim().is_empty() {
                         self.picker.vars.push((
                             self.picker.new_var_k.trim().to_string(),
@@ -1602,12 +1623,8 @@ impl App {
                         ui.label(egui::RichText::new("📂").size(15.0));
                         ui.add_space(2.0);
                         ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new(&name).strong().color(rgb(0xe5e9f0)),
-                            );
-                            ui.label(
-                                egui::RichText::new(&dir).size(10.5).color(rgb(0x5c6678)),
-                            );
+                            ui.label(egui::RichText::new(&name).strong().color(rgb(0xe5e9f0)));
+                            ui.label(egui::RichText::new(&dir).size(10.5).color(rgb(0x5c6678)));
                         });
                     });
                 });
@@ -1756,53 +1773,58 @@ impl App {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for (i, line) in sess.log.iter().enumerate() {
-                            ui.horizontal_top(|ui| {
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(format!("T+{:6.1}s", line.t))
-                                            .color(rgb(0x6b7280))
-                                            .monospace()
-                                            .size(10.5),
-                                    )
-                                    .wrap_mode(egui::TextWrapMode::Extend),
-                                );
-                                // Penanda lipatan ▸/▾ hanya bila entri punya detail.
-                                let marker = match &line.detail {
-                                    Some(_) if line.expanded => "\u{25be} ", // ▾
-                                    Some(_) => "\u{25b8} ",                  // ▸
-                                    None => "  ",
-                                };
-                                let label = egui::Label::new(
-                                    egui::RichText::new(format!("{marker}{}", line.text))
-                                        .color(line.color)
-                                        .monospace()
-                                        .size(11.0),
-                                )
-                                .wrap_mode(egui::TextWrapMode::Extend);
-                                if line.detail.is_some() {
-                                    let r = ui
-                                        .add(label.sense(egui::Sense::click()))
-                                        .on_hover_text("click to expand/collapse");
-                                    if r.clicked() {
-                                        toggle_log = Some(i);
-                                    }
-                                } else {
-                                    ui.add(label);
-                                }
-                            });
-                            if line.expanded {
-                                if let Some(d) = &line.detail {
+                            // push_id: tiap baris punya namespace ID sendiri, agar
+                            // klik satu entri tak bertabrakan ID dengan entri lain
+                            // atau tombol expand-all (klik satu = expand satu).
+                            ui.push_id(i, |ui| {
+                                ui.horizontal_top(|ui| {
                                     ui.add(
                                         egui::Label::new(
-                                            egui::RichText::new(d)
-                                                .color(line.color)
+                                            egui::RichText::new(format!("T+{:6.1}s", line.t))
+                                                .color(rgb(0x6b7280))
                                                 .monospace()
-                                                .size(11.0),
+                                                .size(10.5),
                                         )
                                         .wrap_mode(egui::TextWrapMode::Extend),
                                     );
+                                    // Penanda lipatan ▸/▾ hanya bila entri punya detail.
+                                    let marker = match &line.detail {
+                                        Some(_) if line.expanded => "\u{25be} ", // ▾
+                                        Some(_) => "\u{25b8} ",                  // ▸
+                                        None => "  ",
+                                    };
+                                    let label = egui::Label::new(
+                                        egui::RichText::new(format!("{marker}{}", line.text))
+                                            .color(line.color)
+                                            .monospace()
+                                            .size(11.0),
+                                    )
+                                    .wrap_mode(egui::TextWrapMode::Extend);
+                                    if line.detail.is_some() {
+                                        let r = ui
+                                            .add(label.sense(egui::Sense::click()))
+                                            .on_hover_text("click to expand/collapse");
+                                        if r.clicked() {
+                                            toggle_log = Some(i);
+                                        }
+                                    } else {
+                                        ui.add(label);
+                                    }
+                                });
+                                if line.expanded {
+                                    if let Some(d) = &line.detail {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(d)
+                                                    .color(line.color)
+                                                    .monospace()
+                                                    .size(11.0),
+                                            )
+                                            .wrap_mode(egui::TextWrapMode::Extend),
+                                        );
+                                    }
                                 }
-                            }
+                            });
                         }
                     });
             });
@@ -2034,8 +2056,7 @@ impl App {
                                             .color(rgb(0x3a4258)),
                                     );
                                     ui.label(
-                                        egui::RichText::new("not run yet")
-                                            .color(rgb(0x8b93a7)),
+                                        egui::RichText::new("not run yet").color(rgb(0x8b93a7)),
                                     );
                                     ui.label(
                                         egui::RichText::new(
