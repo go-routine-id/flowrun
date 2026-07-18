@@ -2,7 +2,7 @@
 
 > Dokumen ini ditulis agar sesi Claude (atau engineer) berikutnya bisa lanjut
 > tanpa menggali dari nol. Update dokumen ini setiap kali ada keputusan/fitur besar.
-> Terakhir diperbarui: 18 Jul 2026 (v0.2.0 + premium UI).
+> Terakhir diperbarui: 18 Jul 2026 (v0.2.0 + premium UI + multi-service, log collapsible, UI 100% English).
 
 ## Apa ini & filosofi
 
@@ -27,6 +27,9 @@ Tiga pemisahan yang DISENGAJA (jangan dicampur lagi):
 | **Premium UI (18 Jul)**: tema global gelap + aksen emas ⚡ (`apply_theme`), font fallback lintas-OS agar glyph → ◇ ⟳ tak jadi tofu (`apply_fonts`). Picker ditata ulang: latar gradien+grid, kolom terpusat 660px, hero, kartu `card_lg`, tombol utama, recent klik. Field koneksi kolom-label seragam (`LBL_W=150`, kiri-rata) + `vars seed` toggle manual (bukan `collapsing` yg indent) + baris right-to-left agar field & ikon rata | ✅ |
 | Layout: 🐍 **Ular/serpentine** (default utk rantai linear — flow panjang muat layar), ⇉ LR, ⇊ TD | ✅ |
 | **Percabangan (v0.2)**: kondisi = label edge mermaid (`-->\|pay_mode == cod\|`, `\|else\|` = fallback); GUI modal pilih cabang saat ambigu; `--auto` gagal deterministik; node tak dilalui diredupkan | ✅ |
+| **Multi-service (18 Jul)**: `request:` boleh URL absolut (mis. `{{payment_base}}/...`) → satu flow menembus >1 service tanpa hardcode host (host service kedua dari var env file). Path relatif tetap `base_url + path`. Kunci untuk uji pembayaran digital (wacca `:7281` + payment-service `:7282`) | ✅ |
+| **Log collapsible (18 Jul)**: detail payload/response tiap step default TERTUTUP; klik satu entri = buka satu (`push_id(i)` per baris cegah tabrakan ID egui); tombol "expand all/collapse all" di header log | ✅ |
+| **UI 100% English (18 Jul)**: seluruh string GUI + CLI (`--help` clap) + pesan engine/flow/config error ke bahasa Inggris. Komentar kode SENGAJA tetap Indonesia (tak tampil ke user) | ✅ |
 | Unit test 15/15 (parser, engine, cabang, mock HTTP via std TcpListener) | ✅ |
 
 **SUDAH diuji e2e ke backend nyata** (17 Jul 2026): 16/16 langkah hijau
@@ -41,6 +44,19 @@ service-price → isi `dev.yaml`. Tiga koreksi flow ditemukan saat uji nyata
 (lihat commit): wajib `verify-complete` sebelum final-price; baris selesai
 TIDAK memajukan order (butuh `advance` → ready_pickup); konfirmasi COD hanya
 sah di ready_pickup/delivering/completed.
+
+**Uji ulang 18 Jul 2026 (`examples/wacca-order-branched`)**: 3 jalur hijau e2e
+melawan backend lokal — COD 13/13, DIGITAL 13/13, tolak 3/3. Branched flow
+dulu ketinggalan 2 koreksi di atas (verify-complete + advance) → sudah
+ditambahkan; percabangan `pay_mode` dipindah ke SETELAH `advance→ready_pickup`
+(bayar saat serah-terima). **Pembayaran digital** diuji nyata via step
+`nPaySim`: `POST {{payment_base}}/api/v1/tools/doku-va/simulate-paid`
+`{reference_id=order_id}` ke payment-service `:7282` (butuh fitur URL-absolut) —
+men-settle charge VA lewat JALUR WEBHOOK DOKU yang sama dgn produksi. Catatan:
+order digital bisa `completed` TANPA pembayaran ter-settle (payment async, tak
+menggate penyelesaian order). Charge dibuat saat `add-payment-method` (metode
+VA/QRIS), reference_id = order_id. account-service lokal di `:8874`, payment-
+service `:7282`, wacca `:7281`; password demo `Test@123`.
 Base URL dev WACCA bisa dilihat di `.env.dev` repo wacca-mobile (via VPN internal).
 Catatan 16 Jul 2026 (sesi wacca): (1) kunci JWT account-service dev DIROTASI —
 semua token lama invalid, minta token segar saat mau e2e; (2) path capture
@@ -97,15 +113,17 @@ Jalur cabang diganti tanpa mengubah graf: `--var keputusan=tolak`, `--var pay_mo
 - Test file temp wajib nama unik per test (cargo test paralel satu proses).
 - `LayoutJob::simple` + `wrap.max_rows` + `halign=Center`, gambar via `painter.galley(pos, galley, color)` dgn pos = center − size/2.
 - flowmaid `scene.nodes[i]` SEJAJAR `graph.nodes[i]` (map id → step via indeks).
-- **Tofu glyph (□)**: font default egui (Ubuntu-Light) TAK punya `→`(U+2192), `◇`(U+25C7), `⟳`(U+27F3), dst. Fix = `apply_fonts()` menempel font sistem bercakupan-luas (macOS *Arial Unicode* → Apple Symbols → DejaVu Linux → Arial Windows) sebagai fallback TERAKHIR di kedua family. Teks Latin tetap pakai font default. Bila nambah glyph unik, pastikan ada di fallback.
+- **Tofu glyph (□)**: font default egui (Ubuntu-Light) TAK punya `→`(U+2192), `◇`(U+25C7), `⟳`(U+27F3), `⤢`(U+2922, tombol Fit), dst. Fix = `apply_fonts()` memuat **SEMUA** kandidat font sistem yang ada (bukan berhenti di font pertama!) sbg fallback — cakupan = GABUNGAN. Di macOS *Arial Unicode* (BMP luas) TAK punya sebagian panah spt ⤢ (Supplemental Arrows-B); *Apple Symbols* menutupnya. Cek cakupan codepoint via cmap sebelum pilih glyph. Teks Latin tetap font default.
 - **Rata field egui**: JANGAN hitung lebar via `available_width() - N` per baris (nilainya bergeser → tak rata). Pakai `Layout::right_to_left` (tombol/ikon dikunci kanan, TextEdit `desired_width(available_width())` mengisi sisa). Kolom label: lebar seragam + `allocate_ui_with_layout(left_to_right)` agar kiri-rata. `collapsing` MENG-INDENT isinya → untuk field yg harus sejajar dgn luar, pakai toggle bool manual.
+- **Widget klik dalam loop (egui)**: `Label`/tombol ber-`sense(click)` yang diulang dalam loop bisa BERTABRAKAN ID (auto-id) → klik satu nyasar ke widget lain (mis. klik entri log malah men-trigger tombol "expand all"). Fix: bungkus tiap iterasi dengan `ui.push_id(i, |ui| { ... })` agar tiap baris punya namespace ID sendiri.
+- **String UI = English, komentar = Indonesia**: seluruh string yang TAMPIL ke user (GUI, `--help` clap, pesan error engine/flow/config) berbahasa Inggris. Komentar kode `//` tetap Indonesia. Kalau nambah string user-facing, tulis English; hati-hati tes yg assert substring pesan error (mis. `rejects_cycle` cek `"cyclic"`).
 
 ## Backlog (urutan saran)
 
 1. **Bundle .app macOS** (icon + `cargo bundle`/skrip) — DITUNDA eksplisit oleh owner, kerjakan bila diminta.
-2. **Uji ke backend nyata** — tinggal isi env (2 JWT + uuid seed); `flow.yaml` wacca sudah sesuai kontrak backend (diverifikasi dari source wacca-service Jul 2026).
+2. ~~**Uji ke backend nyata**~~ ✅ SELESAI (17 Jul linear + 18 Jul branched COD/digital/tolak). Yg tersisa cuma refresh token tiap sesi (JWT dev umur ~2 jam).
 3. Report **junit/json** untuk CI.
-4. Step type **webhook-sim** (HMAC payment.paid — simulasi pelunasan digital).
+4. Step type **webhook-sim** (HMAC payment.paid) — untuk wacca sudah tercakup via step `simulate-paid` ke payment-service (pakai fitur URL-absolut); webhook-sim generik (HMAC dari flowrun sendiri) masih berguna utk provider lain.
 5. Kondisi lebih kaya (`>`, `<`, `contains`, dot-path di kiri), capture dari header/status.
 6. Loop/retry (polling sampai kondisi — mis. tunggu `paid`) tanpa merusak DAG visual.
 7. Editor graf drag-and-drop (flowmaid scene API sudah menyediakan geometri interaktif).
