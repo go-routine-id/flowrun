@@ -2156,7 +2156,9 @@ impl App {
             if !sess.fitted && sess.geo.w > 1.0 {
                 let sx = (rect.width() - 2.0 * margin) / sess.geo.w;
                 let sy = (rect.height() - 2.0 * margin) / sess.geo.h;
-                sess.zoom = sx.min(sy).clamp(0.8, 2.0);
+                // Fit HARUS bisa zoom-out sekecil apa pun agar seluruh graf muat;
+                // floor lama 0.8 memotong graf lebar (mis. Snake banyak kolom).
+                sess.zoom = sx.min(sy).clamp(0.1, 2.0);
                 sess.pan = egui::vec2(
                     (rect.width() - sess.geo.w * sess.zoom) / 2.0,
                     (rect.height() - sess.geo.h * sess.zoom) / 2.0,
