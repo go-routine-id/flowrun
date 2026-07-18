@@ -1,0 +1,15 @@
+flowchart TD
+  n01["01 Buat Order → pending"]:::cust --> n03["03 Owner Review Order"]:::ownr
+  n03 --> n04["04 Terima Order → accepted"]:::ownr
+  n04 --> n05["05 Timbang Final"]:::ownr
+  n05 --> n05v["05v Verify Complete"]:::ownr
+  n05v --> n06["06 Harga Final → price_proposed"]:::ownr
+  n06 --> n08["08 Pilih Metode VA + Charge"]:::cust
+  n08 --> n09["09 Setujui Harga → processing"]:::cust
+  n09 --> n11["11 Item Selesai"]:::ownr
+  n11 --> nAdv["Advance → ready_pickup"]:::ownr
+  nAdv --> nPaySim["Bayar VA → simulate-paid (webhook)"]:::cust
+  nPaySim --> n12["12 Konfirmasi Terima → completed"]:::cust
+  n12 --> n13["13 Timeline (verifikasi)"]:::cust
+  classDef cust fill:#3b82f6,stroke:#1d4ed8,color:#fff
+  classDef ownr fill:#f59e0b,stroke:#b45309,color:#1a1204

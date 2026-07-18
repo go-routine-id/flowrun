@@ -1,0 +1,92 @@
+# Alur order + PEMBAYARAN DIGITAL (Virtual Account) end-to-end — LINEAR, tanpa
+# cabang (jadi GUI jalan tanpa perlu --var). Charge VA dibuat saat add-payment-
+# method (n08, payment-service, reference_id = order_id), lalu di-SETTLE lewat
+# JALUR WEBHOOK DOKU via payment-service (nPaySim → {{payment_base}}, base_url
+# kedua). Order bisa `completed` terpisah dari settle-nya (payment async).
+#
+# Butuh URL absolut (flowmaid-nya bukan, engine flowrun ≥ dukungan lintas-service)
+# agar nPaySim bisa menembus payment-service :7282.
+
+auth_profiles: [customer, owner]
+
+steps:
+  n01:
+    auth: customer
+    request: POST /api/v1/customer/orders
+    body:
+      outlet_id: "{{outlet_id}}"
+      delivery_method: self_dropoff
+      note: order VA dari flowrun
+      items:
+        - item_id: "{{item_id}}"
+          unit_of_measure: Kg
+          quantity: 3
+          estimated_pcs: 5
+    capture: { order_id: data.id }
+    assert: { status: 2xx, "data.status": pending }
+
+  n03:
+    auth: owner
+    request: GET /api/v1/tenant/orders/{{order_id}}
+    capture: { order_list_id: data.items.0.id }
+
+  n04:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/accept
+    assert: { "data.status": accepted }
+
+  n05:
+    auth: owner
+    request: PATCH /api/v1/tenant/order-list/{{order_list_id}}/set-final-quantity
+    body: { final_quantity: 3.5, actual_pcs: 6, note: "timbang (flowrun)" }
+
+  n05v:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/verify-complete
+    body: {}
+    note: gate verifikasi owner — wajib sebelum final-price
+
+  n06:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/final-price
+    body: {}
+    assert: { "data.status": price_proposed }
+
+  n08:
+    auth: customer
+    request: PATCH /api/v1/customer/orders/{{order_id}}/add-payment-method
+    body: { payment_method_id: "{{payment_method_id}}" }
+    note: metode VA → payment-service membuat charge (reference_id = order_id)
+
+  n09:
+    auth: customer
+    request: POST /api/v1/customer/orders/{{order_id}}/approve-price
+    assert: { "data.status": processing }
+
+  n11:
+    auth: owner
+    request: PATCH /api/v1/tenant/order-list/{{order_list_id}}/status-finished
+
+  nAdv:
+    auth: owner
+    request: POST /api/v1/tenant/orders/{{order_id}}/advance
+    body: { target: ready_pickup }
+    assert: { "data.status": ready_pickup }
+
+  nPaySim:
+    auth: customer
+    request: POST {{payment_base}}/api/v1/tools/doku-va/simulate-paid
+    body: { reference_id: "{{order_id}}" }
+    assert: { status: 2xx }
+    note: >
+      SETTLE charge VA lewat jalur webhook DOKU (dev simulator di payment-service,
+      base_url kedua {{payment_base}}). HTTP 200 = payment.paid ter-emit.
+
+  n12:
+    auth: customer
+    request: POST /api/v1/customer/orders/{{order_id}}/confirm-receipt
+    assert: { "data.status": completed }
+
+  n13:
+    auth: customer
+    request: GET /api/v1/customer/orders/{{order_id}}/timeline
