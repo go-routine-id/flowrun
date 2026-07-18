@@ -198,7 +198,7 @@ fn describe_token(profile: &str, token: &str) -> String {
         .and_then(b64url)
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
     let Some(c) = claims else {
-        return format!("{profile} (klaim tak terbaca)");
+        return format!("{profile} (claims unreadable)");
     };
     let short = |v: Option<&Value>| {
         v.and_then(|x| x.as_str())
@@ -212,9 +212,9 @@ fn describe_token(profile: &str, token: &str) -> String {
             .unwrap_or(0);
         let d = e - now;
         if d < 0 {
-            format!("KEDALUWARSA {}m lalu", -d / 60)
+            format!("EXPIRED {}m ago", -d / 60)
         } else {
-            format!("exp {}m lagi", d / 60)
+            format!("exp in {}m", d / 60)
         }
     });
     format!(
@@ -347,8 +347,8 @@ fn execute(
     let request = cfg.request.as_deref().expect("dicek pemanggil");
     let (method, path) = request
         .split_once(' ')
-        .with_context(|| format!("request harus `METHOD /path`: {request}"))?;
-    let method: reqwest::Method = method.trim().parse().context("HTTP method tidak dikenal")?;
+        .with_context(|| format!("request must be `METHOD /path`: {request}"))?;
+    let method: reqwest::Method = method.trim().parse().context("unknown HTTP method")?;
     // Path absolut (mis. `{{payment_base}}/...` menuju service lain) dipakai apa
     // adanya — base_url TIDAK di-prepend. Ini yang memungkinkan satu flow menembus
     // >1 service (mis. wacca-service + payment-service) tanpa hardcode host: host
@@ -368,7 +368,7 @@ fn execute(
         let token = ctx
             .tokens
             .get(profile)
-            .with_context(|| format!("token profil auth '{profile}' tidak ada di env file"))?;
+            .with_context(|| format!("auth profile token '{profile}' not found in env file"))?;
         req = req.bearer_auth(token);
         if ctx.reveal_tokens {
             curl.push_str(&format!(" -H \"Authorization: Bearer {token}\""));
@@ -414,7 +414,7 @@ fn execute(
                 ctx.vars.insert(var.clone(), s);
             }
             None => notes.push(format!(
-                "capture {var}: path `{path}` tidak ada di response"
+                "capture {var}: path `{path}` not found in response"
             )),
         }
     }
@@ -433,12 +433,12 @@ fn execute(
         match dot_get(&body, key) {
             Some(actual) if value_to_var(actual) == expected => {}
             Some(actual) => failures.push(format!("{key} = {} ≠ {expected}", value_to_var(actual))),
-            None => failures.push(format!("{key}: tidak ada di response (harap {expected})")),
+            None => failures.push(format!("{key}: not found in response (expected {expected})")),
         }
     }
     // Tanpa assert status eksplisit → wajib 2xx (default aman untuk mode test).
     if !status_asserted && !(200..300).contains(&http_status) {
-        failures.push(format!("HTTP {http_status} (bukan 2xx)"));
+        failures.push(format!("HTTP {http_status} (not 2xx)"));
     }
 
     let outcome = if failures.is_empty() {
