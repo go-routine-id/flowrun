@@ -52,6 +52,13 @@
   .diagram img { display: block; height: auto; }
   .diag-cap { color: var(--muted); font-size: 13px; margin: 10px 2px 34px; }
 
+  .shots { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 820px) { .shots { grid-template-columns: 1fr; } }
+  .shot { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #0d0f15; box-shadow: 0 8px 30px rgba(10,15,25,.28); }
+  .shot img { display: block; width: 100%; height: auto; }
+  .shot .cap { padding: 12px 16px; font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); }
+  .shot .cap b { color: var(--head); }
+
   .steps { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; }
   @media (max-width: 820px) { .steps { grid-template-columns: 1fr; } }
   pre { background: #1c2230; color: #dfe6f2; padding: 16px; border-radius: 10px; font-size: 12.5px; line-height: 1.55; overflow-x: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -147,6 +154,23 @@ flowrun run … --auto</pre>
     <p class="lead">Edge labels are conditions, evaluated over captured variables. Exactly one true edge is taken; ambiguity pauses in the GUI and fails deterministically in <code>--auto</code>. Change the path without touching the graph: <code>--var pay_mode=digital</code>.</p>
     <div class="diagram"><img src="ex-branch.svg" alt="A branching order flow rendered by flowrun via flowmaid" loading="lazy"></div>
     <p class="diag-cap">Owner accept/reject and COD/digital forks — the runner picks the live branch and dims the road not taken.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>A desktop app, not a terminal toy</h2>
+    <p class="lead">The native GUI (<code>--features gui</code>) is a full workbench: open a flow, edit the connection &amp; tokens in-app, then watch the graph run on a premium canvas — pinch-zoom, pan, per-node inspector with method badges, and re-run a single node. No browser, no CORS.</p>
+    <div class="shots">
+      <div class="shot">
+        <img src="desktop-picker.png" alt="flowrun desktop — open-flow screen" loading="lazy">
+        <div class="cap"><b>Open a flow</b> — pick the <code>.mmd</code>/<code>.yaml</code>, tweak base URL, tokens and seed vars for the session (never written to disk).</div>
+      </div>
+      <div class="shot">
+        <img src="desktop-run.png" alt="flowrun desktop — run screen with live graph" loading="lazy">
+        <div class="cap"><b>Run it live</b> — the graph recolours per step (🟡 running · 🟢 ok · 🔴 fail), with request/response and a re-runnable node inspector on the right.</div>
+      </div>
+    </div>
   </div>
 </section>
 
