@@ -5,4 +5,5 @@ pub mod config;
 pub mod diagram;
 pub mod engine;
 pub mod flow;
+pub mod graph_edit;
 pub mod runner_ui;

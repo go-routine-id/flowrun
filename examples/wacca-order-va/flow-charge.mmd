@@ -1,0 +1,9 @@
+flowchart TD
+  n01["01 Buat Order → pending"]:::cust --> n03["03 Owner Review"]:::ownr
+  n03 --> n04["04 Terima → accepted"]:::ownr
+  n04 --> n05["05 Timbang Final"]:::ownr
+  n05 --> n05v["05v Verify Complete"]:::ownr
+  n05v --> n06["06 Harga Final → price_proposed"]:::ownr
+  n06 --> n08["08 Charge QRIS (berhenti di sini)"]:::cust
+  classDef cust fill:#3b82f6,stroke:#1d4ed8,color:#fff
+  classDef ownr fill:#f59e0b,stroke:#b45309,color:#1a1204

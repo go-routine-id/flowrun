@@ -14,9 +14,10 @@ use clap::Parser;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
-use flowrun::config::{self, EnvConfig};
+use flowrun::config::{self, EnvConfig, FlowConfig};
 use flowrun::engine::{Ctx, Next, Outcome, choose_next, run_step};
 use flowrun::flow::{self, FlowEdge, FlowStep};
+use flowrun::graph_edit;
 
 // ============================= CLI =============================
 
@@ -337,6 +338,35 @@ struct Geometry {
     h: f32,
 }
 
+// ============ persistensi posisi node (mode editor) ============
+// Sidecar `flow.layout.yaml` di sebelah flow.mmd — di-commit, jadi arrangement
+// dibagi ke semua. Menjaga flow.yaml (eksekusi) & .mmd (mermaid) tetap bersih.
+
+#[derive(Serialize, Deserialize, Default)]
+struct LayoutFile {
+    /// node_id → [x, y] (koordinat scene). Hanya node yang DIGESER disimpan.
+    positions: std::collections::BTreeMap<String, [f64; 2]>,
+}
+
+/// `flow.mmd` → `flow.layout.yaml` (ganti ekstensi).
+fn layout_path_for(flow: &Path) -> PathBuf {
+    flow.with_extension("layout.yaml")
+}
+
+/// Muat posisi tersimpan (node_id → (x,y)); kosong bila file tak ada/rusak.
+fn load_layout(path: &Path) -> HashMap<String, (f64, f64)> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_yaml::from_str::<LayoutFile>(&s).ok())
+        .map(|d| {
+            d.positions
+                .into_iter()
+                .map(|(k, v)| (k, (v[0], v[1])))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum LayoutDir {
     /// Serpentine: rantai linear dilipat beberapa baris zig-zag agar seluruh
@@ -510,6 +540,8 @@ struct Session {
     base_scene: flowmaid::scene::Scene,
     centers: Vec<(f64, f64)>,
     drag: Option<usize>,
+    /// Sidecar posisi (editor): `flow.layout.yaml`. Auto-save saat drag selesai.
+    layout_path: PathBuf,
     zoom: f32,
     pan: egui::Vec2,
     fitted: bool,
@@ -557,8 +589,27 @@ impl Session {
             LayoutDir::TD
         };
         let (geo, scene, graph) = build_geometry(&parsed.mermaid_src, &node_to_step, dir)?;
-        let centers: Vec<(f64, f64)> = scene.nodes.iter().map(|n| (n.x, n.y)).collect();
         let base_scene = scene.clone();
+        let mut centers: Vec<(f64, f64)> = scene.nodes.iter().map(|n| (n.x, n.y)).collect();
+        // Editor: terapkan posisi tersimpan (flow.layout.yaml) di atas layout auto.
+        let layout_path = layout_path_for(flow_path);
+        let saved = load_layout(&layout_path);
+        let mut moved = false;
+        for (i, n) in scene.nodes.iter().enumerate() {
+            if let Some(&p) = saved.get(&n.id) {
+                centers[i] = p;
+                moved = true;
+            }
+        }
+        let (scene, geo) = if moved {
+            let base_centers: Vec<(f64, f64)> =
+                base_scene.nodes.iter().map(|n| (n.x, n.y)).collect();
+            let s = flowmaid::scene::route_partial(&graph, &centers, &base_scene, &base_centers);
+            let g = scene_to_geometry(&s, &node_to_step);
+            (s, g)
+        } else {
+            (scene, geo)
+        };
         let meta: Vec<StepMeta> = parsed
             .steps
             .iter()
@@ -609,6 +660,7 @@ impl Session {
             base_scene,
             centers,
             drag: None,
+            layout_path,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             fitted: false,
@@ -761,6 +813,30 @@ impl Session {
         );
         self.geo = scene_to_geometry(&self.scene, &self.node_to_step);
     }
+
+    /// Simpan posisi node yang DIGESER (beda dari layout auto) ke sidecar
+    /// `flow.layout.yaml`. Dipanggil otomatis saat drag selesai (auto-save).
+    fn save_layout(&mut self) {
+        let base_centers: Vec<(f64, f64)> =
+            self.base_scene.nodes.iter().map(|n| (n.x, n.y)).collect();
+        let mut positions = std::collections::BTreeMap::new();
+        for (i, n) in self.scene.nodes.iter().enumerate() {
+            let (cx, cy) = self.centers[i];
+            let (bx, by) = base_centers[i];
+            if (cx - bx).abs() > 0.5 || (cy - by).abs() > 0.5 {
+                positions.insert(n.id.clone(), [cx, cy]);
+            }
+        }
+        let doc = LayoutFile { positions };
+        if let Ok(s) = serde_yaml::to_string(&doc)
+            && std::fs::write(&self.layout_path, s).is_ok()
+        {
+            self.logln(
+                format!("💾 layout tersimpan → {}", self.layout_path.display()),
+                rgb(0x22c55e),
+            );
+        }
+    }
 }
 
 // ====================== picker (layar buka) ====================
@@ -860,11 +936,269 @@ impl Picker {
     }
 }
 
+// ============================ editor =============================
+
+/// Selection di canvas edit-mode: node atau edge (index scene, sama seperti
+/// `Session::scene.hit_test` — LIHAT catatan itu, bukan index step).
+#[derive(Clone, Copy, PartialEq)]
+enum EditSel {
+    Node(usize),
+    Edge(usize),
+}
+
+/// Layar edit topologi `.mmd` — TERPISAH dari `Session` (lihat CONTEXT.md:
+/// visual/eksekusi/engine sengaja dipisah). Bekerja langsung di atas
+/// `flowmaid::model::Graph` mentah, tak menyentuh worker/HTTP sama sekali.
+/// `flow.yaml` cuma disentuh (opsional) utk sinkron `steps` saat node
+/// dihapus/di-rename. Drag-reposisi (spt `Session`/`flow.layout.yaml`)
+/// SENGAJA belum didukung di sini — fast-follow terpisah.
+struct Editor {
+    graph: flowmaid::model::Graph,
+    /// Hasil `to_mermaid` terakhir — basis reparse (lihat `graph_edit` soal
+    /// kenapa reparse wajib sesudah tiap mutasi struktural).
+    mermaid_src: String,
+    flow_cfg: FlowConfig,
+    mmd_path: PathBuf,
+    cfg_path: Option<PathBuf>,
+    geo: Geometry,
+    scene: flowmaid::scene::Scene,
+    /// true kalau `.mmd` pakai `subgraph` — hapus node dinonaktifkan (lihat
+    /// `graph_edit::remove_node`, reindex belum menyentuh subgraph member).
+    has_subgraphs: bool,
+    selected: Option<EditSel>,
+    /// Mode "Sambung" aktif (armed) — klik node pertama = sumber edge.
+    connect_mode: bool,
+    connecting_from: Option<usize>,
+    mmd_dirty: bool,
+    /// `flow.yaml` (`steps`) berubah — HANYA true sesudah delete/rename node
+    /// yang punya entry; tambah node/edge tak pernah menyentuh flow.yaml.
+    cfg_dirty: bool,
+    zoom: f32,
+    pan: egui::Vec2,
+    fitted: bool,
+    show_add_node: bool,
+    new_node_id: String,
+    new_node_label: String,
+    new_node_role: Role,
+    /// Scratch id/label/kondisi node/edge terpilih — direset tiap ganti
+    /// seleksi via `select_node`/`select_edge`.
+    edit_id: String,
+    edit_label: String,
+    edge_label: String,
+    error: Option<String>,
+    status: Option<String>,
+}
+
+impl Editor {
+    fn open(mmd_path: PathBuf, cfg_path: Option<PathBuf>) -> anyhow::Result<Self> {
+        let mermaid_src = std::fs::read_to_string(&mmd_path)
+            .map_err(|e| anyhow::anyhow!("read {}: {e}", mmd_path.display()))?;
+        let flow_cfg = match &cfg_path {
+            Some(p) => config::load_flow_config(p)?,
+            None => FlowConfig::default(),
+        };
+        let (graph, geo, scene, has_subgraphs) = Editor::parse(&mermaid_src)?;
+        Ok(Editor {
+            graph,
+            mermaid_src,
+            flow_cfg,
+            mmd_path,
+            cfg_path,
+            geo,
+            scene,
+            has_subgraphs,
+            selected: None,
+            connect_mode: false,
+            connecting_from: None,
+            mmd_dirty: false,
+            cfg_dirty: false,
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+            fitted: false,
+            show_add_node: false,
+            new_node_id: String::new(),
+            new_node_label: String::new(),
+            new_node_role: Role::Neutral,
+            edit_id: String::new(),
+            edit_label: String::new(),
+            edge_label: String::new(),
+            error: None,
+            status: None,
+        })
+    }
+
+    /// Parse mermaid → (graph, geometri canvas, scene mentah utk hit-test,
+    /// ada-subgraph). Satu titik parse dipakai `open` & `commit`.
+    fn parse(mermaid_src: &str) -> anyhow::Result<(flowmaid::model::Graph, Geometry, flowmaid::scene::Scene, bool)> {
+        let mut graph = match flowmaid::parser::parse_document(mermaid_src)
+            .map_err(|e| anyhow::anyhow!("parse: {e:?}"))?
+        {
+            flowmaid::model::Document::Flowchart(g) | flowmaid::model::Document::State(g) => g,
+            _ => anyhow::bail!("bukan flowchart"),
+        };
+        graph.direction = flowmaid::model::Direction::TD;
+        let scene = flowmaid::scene::scene(&graph);
+        // Identitas: "step" Geometry di editor = index node di graph (tak
+        // ada konsep step flow.yaml di sini, beda dgn Session).
+        let node_to_step: HashMap<String, usize> = graph.nodes.iter().enumerate().map(|(i, n)| (n.id.clone(), i)).collect();
+        let geo = scene_to_geometry(&scene, &node_to_step);
+        let has_subgraphs = !graph.subgraphs.is_empty();
+        Ok((graph, geo, scene, has_subgraphs))
+    }
+
+    /// Terapkan mutasi `f` ke graph, lalu WAJIB serialize→reparse — `index`
+    /// privat `flowmaid::model::Graph` jadi basi kalau tidak (lihat
+    /// `graph_edit`). Sekaligus jadi titik refresh geometri/scene.
+    fn commit(&mut self, f: impl FnOnce(&mut flowmaid::model::Graph)) {
+        f(&mut self.graph);
+        let mmd = flowmaid::to_mermaid(&self.graph);
+        match Editor::parse(&mmd) {
+            Ok((graph, geo, scene, has_subgraphs)) => {
+                self.graph = graph;
+                self.mermaid_src = mmd;
+                self.geo = geo;
+                self.scene = scene;
+                self.has_subgraphs = has_subgraphs;
+                self.mmd_dirty = true;
+                self.error = None;
+            }
+            Err(e) => self.error = Some(format!("reparse after edit failed: {e:#}")),
+        }
+    }
+
+    fn select_node(&mut self, idx: usize) {
+        self.selected = Some(EditSel::Node(idx));
+        self.edit_id = self.graph.nodes[idx].id.clone();
+        self.edit_label = self.graph.nodes[idx].label.clone();
+        self.error = None;
+    }
+
+    fn select_edge(&mut self, idx: usize) {
+        self.selected = Some(EditSel::Edge(idx));
+        self.edge_label = self.graph.edges[idx].label.clone().unwrap_or_default();
+        self.error = None;
+    }
+
+    fn confirm_add_node(&mut self) {
+        let id = self.new_node_id.trim().to_string();
+        if let Err(e) = graph_edit::validate_node_id(&id, &self.graph, None) {
+            self.error = Some(e.to_string());
+            return;
+        }
+        let label = self.new_node_label.trim();
+        let label = if label.is_empty() { id.clone() } else { label.to_string() };
+        let fill = role_fill_hex(self.new_node_role).map(str::to_string);
+        self.commit(|g| {
+            let idx = g.ensure_node(&id, Some(label), None);
+            g.nodes[idx].style.fill = fill;
+        });
+        self.show_add_node = false;
+        self.new_node_id.clear();
+        self.new_node_label.clear();
+        self.new_node_role = Role::Neutral;
+    }
+
+    fn delete_selected_node(&mut self, idx: usize) {
+        if self.has_subgraphs {
+            self.error = Some("this flow uses mermaid subgraphs — node delete isn't supported by the editor yet".into());
+            return;
+        }
+        let id = self.graph.nodes[idx].id.clone();
+        self.commit(|g| graph_edit::remove_node(g, idx));
+        if self.flow_cfg.steps.remove(&id).is_some() {
+            self.cfg_dirty = true;
+        }
+        self.selected = None;
+    }
+
+    fn delete_selected_edge(&mut self, idx: usize) {
+        self.commit(|g| graph_edit::remove_edge(g, idx));
+        self.selected = None;
+    }
+
+    fn confirm_rename_node(&mut self, idx: usize) {
+        let new_id = self.edit_id.trim().to_string();
+        if let Err(e) = graph_edit::validate_node_id(&new_id, &self.graph, Some(idx)) {
+            self.error = Some(e.to_string());
+            return;
+        }
+        let old_id = self.graph.nodes[idx].id.clone();
+        let new_label = self.edit_label.trim().to_string();
+        self.commit(|g| {
+            g.nodes[idx].id = new_id.clone();
+            if !new_label.is_empty() {
+                g.nodes[idx].label = new_label.clone();
+            }
+        });
+        if old_id != new_id {
+            if let Some(cfg) = self.flow_cfg.steps.remove(&old_id) {
+                self.flow_cfg.steps.insert(new_id.clone(), cfg);
+                self.cfg_dirty = true;
+            }
+        }
+        // Rename murni (tanpa add/remove) tak menggeser index — aman
+        // reselect di idx yang sama.
+        self.selected = Some(EditSel::Node(idx));
+    }
+
+    fn confirm_edit_edge_label(&mut self, idx: usize) {
+        let label = self.edge_label.trim().to_string();
+        let label = if label.is_empty() { None } else { Some(label) };
+        self.commit(|g| g.edges[idx].label = label);
+        self.selected = Some(EditSel::Edge(idx));
+    }
+
+    fn save(&mut self) -> anyhow::Result<()> {
+        if self.mmd_dirty {
+            std::fs::write(&self.mmd_path, &self.mermaid_src).map_err(|e| anyhow::anyhow!("write {}: {e}", self.mmd_path.display()))?;
+        }
+        if self.cfg_dirty {
+            if let Some(p) = &self.cfg_path {
+                config::save_flow_config(p, &self.flow_cfg)?;
+            }
+        }
+        // Reparse dari file yang baru ditulis — state yang ditampilkan
+        // selalu 100% cocok dgn yang benar-benar tersimpan di disk.
+        let (graph, geo, scene, has_subgraphs) = Editor::parse(&self.mermaid_src)?;
+        self.graph = graph;
+        self.geo = geo;
+        self.scene = scene;
+        self.has_subgraphs = has_subgraphs;
+        self.mmd_dirty = false;
+        self.cfg_dirty = false;
+        self.status = Some("✅ saved".into());
+        Ok(())
+    }
+}
+
+/// Warna fill node baru sesuai role — sama persis palet `role_color()`,
+/// sebagai hex `NodeStyle.fill` (to_mermaid akan menuliskannya sbg `style
+/// <id> fill:...`).
+fn role_fill_hex(r: Role) -> Option<&'static str> {
+    match r {
+        Role::Customer => Some("#3b82f6"),
+        Role::Owner => Some("#f59e0b"),
+        Role::Neutral => None,
+    }
+}
+
+fn parse_hex_color(s: &str) -> Option<egui::Color32> {
+    let s = s.trim_start_matches('#');
+    if s.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some(egui::Color32::from_rgb(r, g, b))
+}
+
 // ============================ app ==============================
 
 struct App {
     picker: Picker,
     session: Option<Session>,
+    editor: Option<Editor>,
     timeout: u64,
     reveal_tokens: bool,
 }
@@ -1221,13 +1555,33 @@ impl App {
             Err(e) => self.picker.error = Some(format!("{e:#}")),
         }
     }
+
+    /// Buka layar edit topologi `.mmd` — flow.yaml opsional (cuma dipakai
+    /// sinkron `steps` saat delete/rename node; tanpa itu, edit topology-only).
+    fn try_edit(&mut self) {
+        let Some(f) = self.picker.flow.clone() else {
+            self.picker.error = Some("select flow.mmd first".into());
+            return;
+        };
+        let cfg = self.picker.cfg.clone();
+        match Editor::open(f, cfg) {
+            Ok(e) => {
+                self.session = None;
+                self.editor = Some(e);
+            }
+            Err(e) => self.picker.error = Some(format!("{e:#}")),
+        }
+    }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
-        match &mut self.session {
-            Some(_) => self.ui_run(ctx),
-            None => self.ui_picker(ctx),
+        if self.session.is_some() {
+            self.ui_run(ctx);
+        } else if self.editor.is_some() {
+            self.ui_editor(ctx);
+        } else {
+            self.ui_picker(ctx);
         }
     }
 }
@@ -1292,6 +1646,20 @@ impl App {
                                         .color(rgb(0x64748b)),
                                     );
                                 }
+
+                                ui.add_space(8.0);
+                                ui.add_enabled_ui(self.picker.flow.is_some(), |ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new("📝  Edit .mmd")
+                                                .min_size(egui::vec2(colw, 34.0)),
+                                        )
+                                        .on_hover_text("edit graph topology (add/delete/connect nodes & edges) — no token/env needed")
+                                        .clicked()
+                                    {
+                                        self.try_edit();
+                                    }
+                                });
 
                                 self.picker_recent(ui, colw);
                                 ui.add_space(40.0);
@@ -2197,7 +2565,10 @@ impl App {
                 }
             }
             if resp.drag_stopped() {
-                sess.drag = None;
+                // Node baru saja digeser → persist arrangement ke flow.layout.yaml.
+                if sess.drag.take().is_some() {
+                    sess.save_layout();
+                }
             }
             if !ui.ctx().wants_keyboard_input() {
                 let (fit_key, hundred) = ui.input(|i| {
@@ -2370,6 +2741,276 @@ impl App {
     }
 }
 
+// -------------------------- layar edit --------------------------
+
+impl App {
+    fn ui_editor(&mut self, ctx: &egui::Context) {
+        let mut close = false;
+        let ed = self.editor.as_mut().expect("checked by caller");
+
+        egui::TopBottomPanel::top("edit_bar").show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("📂  Close").clicked() {
+                    close = true;
+                }
+                ui.separator();
+                if ui.button("＋ Node").clicked() {
+                    ed.show_add_node = true;
+                }
+                if ui.selectable_label(ed.connect_mode, "🔗  Connect").clicked() {
+                    ed.connect_mode = !ed.connect_mode;
+                    ed.connecting_from = None;
+                }
+                if let Some(cf) = ed.connecting_from {
+                    let from_id = ed.graph.nodes[cf].id.clone();
+                    ui.colored_label(accent(), format!("click target node (from '{from_id}') — right-click to cancel"));
+                } else if ed.connect_mode {
+                    ui.small("click source node");
+                }
+                ui.separator();
+                if ui.button("⤢  Fit").clicked() {
+                    ed.fitted = false;
+                }
+                ui.separator();
+                let dirty = ed.mmd_dirty || ed.cfg_dirty;
+                ui.add_enabled_ui(dirty, |ui| {
+                    if primary_button(ui, "💾  Save", 100.0).clicked() {
+                        if let Err(e) = ed.save() {
+                            ed.error = Some(format!("{e:#}"));
+                        }
+                    }
+                });
+                if dirty {
+                    ui.colored_label(accent(), "●  unsaved");
+                } else if let Some(s) = &ed.status {
+                    ui.colored_label(rgb(0x22c55e), s.as_str());
+                }
+            });
+            if let Some(e) = &ed.error {
+                ui.colored_label(rgb(0xf87171), format!("⚠  {e}"));
+            }
+            ui.small("note: saving normalizes .mmd (e.g. classDef/class → per-node style) — original formatting isn't preserved");
+            ui.add_space(4.0);
+        });
+
+        egui::SidePanel::right("edit_inspector")
+            .resizable(true)
+            .default_width(340.0)
+            .show(ctx, |ui| {
+                ui.add_space(6.0);
+                match ed.selected {
+                    Some(EditSel::Node(i)) if i < ed.graph.nodes.len() => {
+                        let node = ed.graph.nodes[i].clone();
+                        ui.heading(node.label.as_str());
+                        ui.label(format!("current id: {}", node.id));
+                        ui.separator();
+                        ui.label("new id:");
+                        ui.text_edit_singleline(&mut ed.edit_id);
+                        ui.label("label:");
+                        ui.text_edit_singleline(&mut ed.edit_label);
+                        if ui.button("Apply").clicked() {
+                            ed.confirm_rename_node(i);
+                        }
+                        ui.separator();
+                        let hover = if ed.has_subgraphs {
+                            "this flow uses mermaid subgraphs — node delete isn't supported yet"
+                        } else {
+                            "delete this node & every edge touching it"
+                        };
+                        if ui.add_enabled(!ed.has_subgraphs, egui::Button::new("🗑  Delete node")).on_hover_text(hover).clicked() {
+                            ed.delete_selected_node(i);
+                        }
+                    }
+                    Some(EditSel::Edge(i)) if i < ed.graph.edges.len() => {
+                        let e = ed.graph.edges[i].clone();
+                        let from = ed.graph.nodes[e.from].id.clone();
+                        let to = ed.graph.nodes[e.to].id.clone();
+                        ui.heading(format!("{from} → {to}"));
+                        ui.separator();
+                        ui.label("condition (empty = unconditional; var == value / != value; or `else`):");
+                        ui.text_edit_singleline(&mut ed.edge_label);
+                        if ui.button("Apply").clicked() {
+                            ed.confirm_edit_edge_label(i);
+                        }
+                        ui.separator();
+                        if ui.button("🗑  Delete edge").clicked() {
+                            ed.delete_selected_edge(i);
+                        }
+                    }
+                    _ => {
+                        ed.selected = None;
+                        ui.colored_label(rgb(0x64748b), "click a node/edge on the canvas to edit");
+                    }
+                }
+            });
+
+        if ed.show_add_node {
+            egui::Window::new("＋ New node")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("id");
+                        ui.text_edit_singleline(&mut ed.new_node_id);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("label");
+                        ui.text_edit_singleline(&mut ed.new_node_label);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("role");
+                        ui.selectable_value(&mut ed.new_node_role, Role::Neutral, "-");
+                        ui.selectable_value(&mut ed.new_node_role, Role::Customer, "Customer");
+                        ui.selectable_value(&mut ed.new_node_role, Role::Owner, "Owner");
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Add").clicked() {
+                            ed.confirm_add_node();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            ed.show_add_node = false;
+                        }
+                    });
+                });
+        }
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let (resp, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
+            let rect = resp.rect;
+
+            let margin = 40.0;
+            if !ed.fitted && ed.geo.w > 1.0 {
+                let sx = (rect.width() - 2.0 * margin) / ed.geo.w;
+                let sy = (rect.height() - 2.0 * margin) / ed.geo.h;
+                ed.zoom = sx.min(sy).clamp(0.1, 2.0);
+                ed.pan = egui::vec2((rect.width() - ed.geo.w * ed.zoom) / 2.0, (rect.height() - ed.geo.h * ed.zoom) / 2.0);
+                ed.fitted = true;
+            }
+            draw_premium_bg(&painter, rect, ed.pan, ed.zoom);
+
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 && resp.hovered() {
+                if let Some(p) = resp.hover_pos() {
+                    let old = ed.zoom;
+                    ed.zoom = (ed.zoom * (1.0 + scroll * 0.0015)).clamp(0.1, 6.0);
+                    let s = (p - rect.min - ed.pan) / old;
+                    ed.pan = (p - rect.min) - s * ed.zoom;
+                }
+            }
+            if resp.dragged() {
+                ed.pan += resp.drag_delta();
+            }
+            let zoom = ed.zoom;
+            let base = rect.min + ed.pan;
+            let tf = |p: egui::Pos2| base + egui::vec2(p.x * zoom, p.y * zoom);
+
+            // edges + arrowheads (white = selected)
+            for (k, (pts, _src)) in ed.geo.edges.iter().enumerate() {
+                let sel = matches!(ed.selected, Some(EditSel::Edge(i)) if i == k);
+                let col = if sel { rgb(0xf0f4fa) } else { rgb(0x4b5563) };
+                let poly: Vec<egui::Pos2> = pts.iter().map(|&p| tf(p)).collect();
+                if poly.len() >= 2 {
+                    painter.add(egui::Shape::line(poly.clone(), egui::Stroke::new(2.0, col)));
+                    let end = poly[poly.len() - 1];
+                    let prev = poly[poly.len() - 2];
+                    let d = (end - prev).normalized();
+                    if d.length() > 0.1 {
+                        let perp = egui::vec2(-d.y, d.x);
+                        let sz = (7.0 * zoom).clamp(5.0, 14.0);
+                        painter.add(egui::Shape::convex_polygon(
+                            vec![end, end - d * sz + perp * sz * 0.55, end - d * sz - perp * sz * 0.55],
+                            col,
+                            egui::Stroke::NONE,
+                        ));
+                    }
+                }
+            }
+
+            // nodes: fill dari NodeStyle.fill (role saat dibuat, atau
+            // classDef/style hasil parse file lama) — bukan status eksekusi.
+            for sn in &ed.geo.nodes {
+                let c = tf(sn.center);
+                let size = sn.size * zoom;
+                let r = egui::Rect::from_center_size(c, size);
+                let node = &ed.graph.nodes[sn.step];
+                let fill = node.style.fill.as_deref().and_then(parse_hex_color).unwrap_or(rgb(0x3a3f4b));
+                painter.rect_filled(r, egui::Rounding::same(6.0), fill);
+
+                let sel = matches!(ed.selected, Some(EditSel::Node(i)) if i == sn.step);
+                let connecting = ed.connecting_from == Some(sn.step);
+                if connecting {
+                    painter.rect_stroke(r.expand(3.0), egui::Rounding::same(8.0), egui::Stroke::new(3.0, accent()));
+                } else if sel {
+                    painter.rect_stroke(r.expand(2.0), egui::Rounding::same(7.0), egui::Stroke::new(2.0, rgb(0xf0f4fa)));
+                }
+                painter.rect_stroke(r, egui::Rounding::same(6.0), egui::Stroke::new(1.0, rgb(0x14161b)));
+
+                let font_px = 11.0 * zoom;
+                if font_px >= 6.5 {
+                    let font = egui::FontId::proportional(font_px.min(20.0));
+                    let txt_col = rgb(0xffffff);
+                    let make = |rows: usize| {
+                        let mut job = egui::text::LayoutJob::simple(sn.label.clone(), font.clone(), txt_col, size.x - 10.0);
+                        job.wrap.max_rows = rows;
+                        job.wrap.overflow_character = Some('…');
+                        job.halign = egui::Align::Center;
+                        painter.layout_job(job)
+                    };
+                    let mut galley = make(2);
+                    if galley.size().y > size.y - 3.0 {
+                        galley = make(1);
+                    }
+                    if galley.size().y <= size.y - 1.0 {
+                        painter.galley(egui::pos2(c.x, c.y - galley.size().y / 2.0), galley, txt_col);
+                    }
+                }
+            }
+
+            if resp.secondary_clicked() {
+                ed.connect_mode = false;
+                ed.connecting_from = None;
+            }
+            if resp.clicked() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let sp = (pos - rect.min - ed.pan) / ed.zoom;
+                    let tol = (6.0 / ed.zoom) as f64;
+                    let hit = ed.scene.hit_test(sp.x as f64, sp.y as f64, tol);
+                    if ed.connect_mode {
+                        if let Some(flowmaid::scene::Hit::Node(ni)) = hit {
+                            match ed.connecting_from {
+                                None => ed.connecting_from = Some(ni),
+                                Some(cf) if cf != ni => {
+                                    ed.commit(|g| {
+                                        g.add_edge(cf, ni, None, flowmaid::model::EdgeKind::Arrow);
+                                    });
+                                    let new_idx = ed.graph.edges.len() - 1;
+                                    ed.select_edge(new_idx);
+                                    ed.connecting_from = None;
+                                }
+                                _ => ed.connecting_from = None,
+                            }
+                        }
+                    } else {
+                        match hit {
+                            Some(flowmaid::scene::Hit::Node(i)) => ed.select_node(i),
+                            Some(flowmaid::scene::Hit::Edge(i)) => ed.select_edge(i),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        });
+
+        ctx.request_repaint_after(Duration::from_millis(60));
+
+        if close {
+            self.editor = None;
+        }
+    }
+}
+
 fn legend(ui: &mut egui::Ui, c: egui::Color32, label: &str) {
     let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
     ui.painter().rect_filled(r, egui::Rounding::same(2.0), c);
@@ -2415,6 +3056,7 @@ fn main() -> anyhow::Result<()> {
     let mut app = App {
         picker: Picker::new(),
         session: None,
+        editor: None,
         timeout: args.timeout,
         reveal_tokens: args.reveal_tokens,
     };

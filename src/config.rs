@@ -6,45 +6,54 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Sidecar runner untuk satu flow. Key `steps` = node-id di `flow.mmd`.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, PartialEq)]
 pub struct FlowConfig {
     /// Nama profil auth yang dipakai flow ini (token diambil dari env file).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auth_profiles: Vec<String>,
     /// Vars default flow (bisa dioverride env file / --var).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub vars: BTreeMap<String, serde_yaml::Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub steps: BTreeMap<String, StepConfig>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 /// Config eksekusi satu node. Node yang ada di `.mmd` tapi tak punya entry di
 /// sini diperlakukan sebagai langkah manual (visual-only, di-pause/skip).
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq)]
 pub struct StepConfig {
     /// Nama profil auth (mis. `customer` / `owner`); token dari env file.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
     /// `"METHOD /path"` — path digabung ke base_url, mendukung `{{var}}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub request: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
     /// Body request (YAML → JSON), string di dalamnya mendukung `{{var}}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_yaml::Value>,
     /// `var: dot.path` — ambil nilai dari response JSON ke context vars.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub capture: BTreeMap<String, String>,
     /// `status: 2xx|200` dan/atau `dot.path: nilai-harapan` (equality).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub assert: BTreeMap<String, serde_yaml::Value>,
     /// Ekspresi skip sederhana: `var == nilai` / `var != nilai`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub skip_if: Option<String>,
     /// Langkah eksternal (mis. bayar di gateway) — tak dieksekusi, hanya pause.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub manual: bool,
     /// Catatan bebas, ditampilkan di CLI.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
 
@@ -69,6 +78,15 @@ pub fn load_env_config(path: &Path) -> Result<EnvConfig> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("read env file {}", path.display()))?;
     serde_yaml::from_str(&raw).with_context(|| format!("parse YAML {}", path.display()))
+}
+
+/// Tulis sidecar `flow.yaml` — dipakai editor GUI utk sinkron `steps` setelah
+/// hapus/rename node. CATATAN: penulisan ulang CANONICAL via serde_yaml —
+/// format/komentar/urutan asli file tidak dipertahankan (sama seperti
+/// `flowmaid::to_mermaid` utk `.mmd`).
+pub fn save_flow_config(path: &Path, cfg: &FlowConfig) -> Result<()> {
+    let raw = serde_yaml::to_string(cfg).context("serialize flow.yaml")?;
+    std::fs::write(path, raw).with_context(|| format!("write {}", path.display()))
 }
 
 /// Normalisasi nilai YAML (string/angka/bool) menjadi string var.
@@ -126,5 +144,21 @@ vars: { outlet_id: abc }
         let env: EnvConfig = serde_yaml::from_str(y).unwrap();
         assert_eq!(env.base_url, "https://api.example.test");
         assert_eq!(env.tokens["owner"], "tokO");
+    }
+
+    #[test]
+    fn save_and_reload_is_structurally_equal() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wacca-order/flow.yaml");
+        let original = load_flow_config(&src).unwrap();
+
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!("flowrun-test-{}-cfg-roundtrip.yaml", std::process::id()));
+        save_flow_config(&tmp, &original).unwrap();
+        let reloaded = load_flow_config(&tmp).unwrap();
+        std::fs::remove_file(&tmp).ok();
+
+        // Format/komentar/urutan boleh berubah (canonical rewrite) — yang
+        // wajib sama adalah struktur data (isi steps/vars/auth_profiles).
+        assert_eq!(original, reloaded);
     }
 }
