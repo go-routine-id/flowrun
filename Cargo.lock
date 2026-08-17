@@ -995,9 +995,9 @@ dependencies = [
 
 [[package]]
 name = "flowmaid"
-version = "0.19.0"
+version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4d293ca8b104fc9b4364cfc4a1330f73a12e9db06e5eed1466e2f46f064ee54"
+checksum = "e88cbfd596895515181227b0989852136d1445fa5bcb2669b774c55be2e678a3"
 
 [[package]]
 name = "flowrun"

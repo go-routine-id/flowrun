@@ -2,7 +2,7 @@
 
 > Dokumen ini ditulis agar sesi Claude (atau engineer) berikutnya bisa lanjut
 > tanpa menggali dari nol. Update dokumen ini setiap kali ada keputusan/fitur besar.
-> Terakhir diperbarui: 18 Jul 2026 (v0.2.0 + premium UI + multi-service, log collapsible, UI 100% English).
+> Terakhir diperbarui: 24 Jul 2026 (editor topologi `.mmd` menyatu dgn layar run — satu screen, klik-kanan node).
 
 ## Apa ini & filosofi
 
@@ -30,7 +30,8 @@ Tiga pemisahan yang DISENGAJA (jangan dicampur lagi):
 | **Multi-service (18 Jul)**: `request:` boleh URL absolut (mis. `{{payment_base}}/...`) → satu flow menembus >1 service tanpa hardcode host (host service kedua dari var env file). Path relatif tetap `base_url + path`. Kunci untuk uji pembayaran digital (wacca `:7281` + payment-service `:7282`) | ✅ |
 | **Log collapsible (18 Jul)**: detail payload/response tiap step default TERTUTUP; klik satu entri = buka satu (`push_id(i)` per baris cegah tabrakan ID egui); tombol "expand all/collapse all" di header log | ✅ |
 | **UI 100% English (18 Jul)**: seluruh string GUI + CLI (`--help` clap) + pesan engine/flow/config error ke bahasa Inggris. Komentar kode SENGAJA tetap Indonesia (tak tampil ke user) | ✅ |
-| Unit test 15/15 (parser, engine, cabang, mock HTTP via std TcpListener) | ✅ |
+| **Editor topologi menyatu (24 Jul)**: SATU layar (bukan screen terpisah) — `Session` sekaligus jadi engine edit. Klik-kanan node → context-menu `▶ Run this node` / `⚙ Configure execution` / `🔗 Connect from here` / `🗑 Delete node`; toolbar `＋ Node`/`💾 Save`; edge diklik → inspector kondisi + hapus. Edit struktural (`commit`) ATAU config (`sync`) = soft-reset run (worker di-restart, states/results/vars kosong lagi) — lihat Keputusan Desain | ✅ |
+| Unit test 26/26 (parser, engine, cabang, mock HTTP via std TcpListener, `graph_edit` reindex+round-trip, `config` save/load round-trip, smoke pipeline editor→runner) | ✅ |
 
 **SUDAH diuji e2e ke backend nyata** (17 Jul 2026): 16/16 langkah hijau
 melawan wacca-service terbaru + DB dev — order COD customer↔owner sampai
@@ -69,7 +70,8 @@ BUKAN `order_lists`); body `{}` utk final-price & confirm-cod valid (opsional).
 ```
 src/lib.rs            # re-export modul core (dipakai kedua bin)
 src/config.rs         # schema flow.yaml + env file (serde_yaml)
-src/flow.rs           # parse .mmd via flowmaid → DAG (steps topo-order, edges+cond, start, linear)
+src/flow.rs           # parse .mmd via flowmaid → DAG (steps topo-order, edges+cond, start, linear); load_from_str utk in-memory
+src/graph_edit.rs     # mutasi Graph flowmaid yg blm native (remove_node/edge, validate_node_id) — dipakai Session utk edit topologi
 src/engine.rs         # runner: template/capture/assert/skip_if + choose_next (cabang)
 src/diagram.rs        # regen mermaid + classDef status → render_svg; preview server
 src/runner_ui.rs      # state UI CLI (SVG live + print report)
@@ -97,7 +99,11 @@ Jalur cabang diganti tanpa mengubah graf: `--var keputusan=tolak`, `--var pay_mo
 ## Keputusan desain penting (dan alasannya — jangan diulang debatnya)
 
 - **Rust native, bukan web**: keputusan owner. Bonus: tanpa CORS (bukan fetch browser), `--auto` = test CI satu binary.
-- **flowmaid sebagai library**: parse (`parser::parse_document` → `Document::Flowchart(Graph)`), layout+geometri (`scene::scene(&Graph)` → `SceneNode{x,y,w,h}`, `SceneEdge{bezier/waypoints}`), `render_svg`. `Graph.direction` bisa dioverride (LR/TD) sebelum `scene()`. Versi terpasang 0.17.0.
+- **flowmaid sebagai library**: parse (`parser::parse_document` → `Document::Flowchart(Graph)`), layout+geometri (`scene::scene(&Graph)` → `SceneNode{x,y,w,h}`, `SceneEdge{bezier/waypoints}`), `render_svg`. `Graph.direction` bisa dioverride (LR/TD) sebelum `scene()`. Versi terpasang 0.20.1 — juga dipakai: `to_mermaid(&Graph)` (kebalikan parser, dipakai editor), `Scene::hit_test`/`node_at`/`edge_at` (klik node/edge, sudah ada duluan dari commit 18-19 Jul), `route_partial` (drag reposisi ephemeral, TAK dipakai editor topologi).
+- **Editor topologi SATU layar dgn Session, BUKAN screen terpisah** (percobaan pertama pakai `struct Editor`+layar sendiri, lalu di-refactor total jadi menyatu — jangan diulang jadi 2 screen lagi). `Session` menyimpan `graph: flowmaid::model::Graph` (sumber kebenaran topologi, sudah ada dari fitur drag) + `flow_cfg: FlowConfig` (kini disimpan utuh, dulu cuma dipakai sekali lalu dibuang) + `mmd_path`/`cfg_path`/`env` (retensi utk rebuild). Klik-kanan node → context-menu (`resp.context_menu(..)`, hit-test SENDIRI via `secondary_clicked()` sebelum manggil `.context_menu()` krn closure-nya tak tahu node mana yg diklik).
+- **`Session::sync()`** = satu titik re-derive SEMUA state turunan (`flow::load_from_str` → steps/meta/node_to_step BARU, `build_geometry` → graph/geo/scene BARU, worker di-`Cmd::Quit` lalu restart) dari `mermaid_src`+`flow_cfg` SAAT INI (belum tentu ke-Save). Dipanggil oleh `commit()` (mutasi topologi, lalu `to_mermaid`) & config eksekusi (`flow_cfg` berubah langsung, mis. "Configure execution"). Efeknya: **edit apa pun = soft-reset run** (states/results/vars kosong lagi) — sama kayak klik "Reset" tapi otomatis, karena step-index bisa bergeser kalau topologi berubah.
+- **`flow::load_from_str(src, label, cfg)`** ditambahkan (dulu `load()` cuma baca dari path) — supaya `sync()` bisa re-derive dari `mermaid_src` di MEMORI (belum ke-disk kalau belum Save), bukan cuma dari file.
+- **GOTCHA krusial**: method yg manggil `commit`/`sync` (resize `states`/`results`/`meta`/`total`) TAK BOLEH dipanggil langsung di tengah render frame yg masih baca index lama (mis. `sess.results[i]` di inspector, atau loop node di kanvas) — index bisa jadi out-of-bounds begitu array di-resize. Solusi: kumpulkan niat aksi ke variabel lokal (`act_rename`, `act_delete_node`, dst — pola yg sama dgn `toggle_log`/`bulk_log`/`chosen` yg sudah ada), baru eksekusi SEKALI di akhir fungsi `ui_run` setelah semua panel selesai render. Method yg AMAN dipanggil langsung (tak resize apa pun): `select_node`/`select_edge`/`open_configure`/`run_this_node`/`save`.
 - **Lisensi GPL-3.0-or-later** — konsekuensi link ke flowmaid (GPL). Sadari ini bila mau relicense.
 - **Layout Ular** = milik flowrun, BUKAN flowmaid: layout berlapis (Sugiyama — flowmaid & mermaid.js sama) merender rantai linear sebagai pita panjang; serpentine melipatnya agar muat layar. Hanya valid utk graf linear (`Flow.linear`) — otomatis disembunyikan utk graf bercabang.
 - **Semantik cabang**: kondisi di label edge (`var == nilai` / `!=`; `else`/kosong = fallback). Tepat satu true → jalan; ambigu → GUI bertanya, `--auto` FAIL (test tak boleh menebak). Satu jalur aktif; **fan-out paralel sengaja ditunda** (merge context vars ribet, kebutuhan belum nyata).
@@ -126,7 +132,21 @@ Jalur cabang diganti tanpa mengubah graf: `--var keputusan=tolak`, `--var pay_mo
 4. Step type **webhook-sim** (HMAC payment.paid) — untuk wacca sudah tercakup via step `simulate-paid` ke payment-service (pakai fitur URL-absolut); webhook-sim generik (HMAC dari flowrun sendiri) masih berguna utk provider lain.
 5. Kondisi lebih kaya (`>`, `<`, `contains`, dot-path di kiri), capture dari header/status.
 6. Loop/retry (polling sampai kondisi — mis. tunggu `paid`) tanpa merusak DAG visual.
-7. Editor graf drag-and-drop (flowmaid scene API sudah menyediakan geometri interaktif).
+7. ~~Editor graf drag-and-drop~~ — **SHIPPED 24 Jul** (menyatu 1 layar dgn
+   Session, klik-kanan node). Fast-follow yg masih terbuka:
+   - **Drag-reposisi PERSISTEN belum ada** (beda dgn "Sambung" yg sudah ada) —
+     `flowmaid::model::Node` tak punya field x/y, posisi selalu dihitung ulang
+     layout tiap load. Kalau mau, sidecar terpisah semacam `flow.layout.yaml`
+     (ada draft WIP di clone lain, `/Users/rhyanz46/Programming/flowrun`,
+     belum di-commit — cek dulu sebelum reimplementasi) + `route_partial` utk
+     re-route ephemeral saat drag.
+   - Dukungan `subgraph` mermaid (delete node dinonaktifkan kalau ada
+     subgraph — reindex `graph_edit::remove_node` belum menghitung ulang
+     member subgraph, bisa panic di `to_mermaid` kalau dipaksa).
+   - Shape node selain Rect, edge-kind selain Arrow, undo/redo.
+   - Form "Configure execution" masih raw-YAML (textarea, parse ke
+     `StepConfig`) — bukan form per-field (auth dropdown, request builder,
+     dst). Cukup buat v1; form terstruktur bisa nyusul kalau terasa kurang.
 
 ## Konvensi repo
 

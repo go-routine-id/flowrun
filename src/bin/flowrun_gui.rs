@@ -14,9 +14,10 @@ use clap::Parser;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
-use flowrun::config::{self, EnvConfig};
+use flowrun::config::{self, EnvConfig, FlowConfig, StepConfig};
 use flowrun::engine::{Ctx, Next, Outcome, choose_next, run_step};
 use flowrun::flow::{self, FlowEdge, FlowStep};
+use flowrun::graph_edit;
 
 // ============================= CLI =============================
 
@@ -506,6 +507,8 @@ struct Session {
     /// Untuk drag-and-drop node (≥0.19): graf + layout dasar (immutable) +
     /// center kerja (di-override saat drag). `route_partial` me-reroute HANYA
     /// edge yang terpengaruh, relatif ke `base_scene`. Ephemeral (tak persist).
+    /// JUGA sumber kebenaran topologi utk edit (add/delete/rename/connect) —
+    /// lihat `commit`/`rebuild_run`.
     graph: flowmaid::model::Graph,
     base_scene: flowmaid::scene::Scene,
     centers: Vec<(f64, f64)>,
@@ -515,6 +518,45 @@ struct Session {
     fitted: bool,
     follow: bool,
     center_on: Option<usize>,
+
+    // ---- retensi utk rebuild eksekusi setelah edit struktural (lihat
+    // `commit`/`rebuild_run`) — bukan sekadar param sekali pakai di `start`.
+    mmd_path: PathBuf,
+    cfg_path: PathBuf,
+    env: EnvConfig,
+    timeout: u64,
+    reveal_tokens: bool,
+    flow_cfg: FlowConfig,
+
+    // ---- edit topologi (satu layar, klik-kanan node — lihat CONTEXT.md) ----
+    /// true kalau `.mmd` pakai `subgraph` — hapus node dinonaktifkan (lihat
+    /// `graph_edit::remove_node`, reindex belum menyentuh subgraph member).
+    has_subgraphs: bool,
+    /// Mode "Sambung" aktif (armed dari context-menu) — klik node berikutnya
+    /// jadi target edge.
+    connecting_from: Option<usize>,
+    /// Node yang klik-kanan-nya sedang menampilkan context-menu.
+    context_menu: Option<usize>,
+    /// Edge (index graph) terpilih — utk inspector & edit kondisi.
+    selected_edge: Option<usize>,
+    edge_label: String,
+    show_add_node: bool,
+    new_node_id: String,
+    new_node_label: String,
+    /// Scratch id/label rename — direset tiap ganti seleksi.
+    edit_id: String,
+    edit_label: String,
+    /// Node (index graph) yang popup "Configure execution"-nya sedang tampil.
+    show_configure: Option<usize>,
+    /// Scratch YAML mentah utk popup configure — Apply parse balik jadi
+    /// `StepConfig` (mengcover semua field sekaligus, tanpa form per-field).
+    cfg_form_text: String,
+    mmd_dirty: bool,
+    /// `flow.yaml` (`steps`) berubah — true stlh delete/rename node berconfig
+    /// ATAU stlh "Configure execution" — BUKAN saat tambah node/edge biasa.
+    cfg_dirty: bool,
+    edit_error: Option<String>,
+    edit_status: Option<String>,
 }
 
 impl Drop for Session {
@@ -541,9 +583,7 @@ impl Session {
             }
         }
         let base_url = env.base_url.trim_end_matches('/').to_string();
-        let mut ctx = Ctx::build(&flow_cfg, env, &[]);
-        ctx.reveal_tokens = reveal_tokens;
-        let parsed = flow::load(flow_path, flow_cfg)?;
+        let parsed = flow::load(flow_path, flow_cfg.clone())?;
         let node_to_step: HashMap<String, usize> = parsed
             .steps
             .iter()
@@ -559,6 +599,7 @@ impl Session {
         let (geo, scene, graph) = build_geometry(&parsed.mermaid_src, &node_to_step, dir)?;
         let centers: Vec<(f64, f64)> = scene.nodes.iter().map(|n| (n.x, n.y)).collect();
         let base_scene = scene.clone();
+        let has_subgraphs = !graph.subgraphs.is_empty();
         let meta: Vec<StepMeta> = parsed
             .steps
             .iter()
@@ -571,18 +612,15 @@ impl Session {
             })
             .collect();
         let total = parsed.steps.len();
-
-        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<Cmd>();
-        let (evt_tx, evt_rx) = std::sync::mpsc::channel::<Evt>();
-        let steps = parsed.steps.clone();
-        // Adjacency per node utk graph-walk di worker.
-        let mut adjacency: Vec<Vec<FlowEdge>> = vec![Vec::new(); total];
-        for e in &parsed.edges {
-            adjacency[e.from].push(e.clone());
-        }
-        let start = parsed.start;
-        let linear = parsed.linear;
-        std::thread::spawn(move || worker(ctx, steps, adjacency, start, timeout, cmd_rx, evt_tx));
+        let (tx, rx) = Session::spawn_worker(
+            &flow_cfg,
+            &env,
+            reveal_tokens,
+            timeout,
+            parsed.steps.clone(),
+            &parsed.edges,
+            parsed.start,
+        );
 
         Ok(Session {
             base_url,
@@ -600,10 +638,10 @@ impl Session {
             auto_running: false,
             pending: None,
             finished: false,
-            linear,
+            linear: parsed.linear,
             started: Instant::now(),
-            tx: cmd_tx,
-            rx: evt_rx,
+            tx,
+            rx,
             scene,
             graph,
             base_scene,
@@ -614,7 +652,320 @@ impl Session {
             fitted: false,
             follow: true,
             center_on: None,
+            mmd_path: flow_path.to_path_buf(),
+            cfg_path: cfg_path.to_path_buf(),
+            env,
+            timeout,
+            reveal_tokens,
+            flow_cfg,
+            has_subgraphs,
+            connecting_from: None,
+            context_menu: None,
+            selected_edge: None,
+            edge_label: String::new(),
+            show_add_node: false,
+            new_node_id: String::new(),
+            new_node_label: String::new(),
+            edit_id: String::new(),
+            edit_label: String::new(),
+            show_configure: None,
+            cfg_form_text: String::new(),
+            mmd_dirty: false,
+            cfg_dirty: false,
+            edit_error: None,
+            edit_status: None,
         })
+    }
+
+    /// Bangun `Ctx` + jalankan worker thread baru dari topologi `steps`/
+    /// `edges` (hasil `flow::load`/`load_from_str`). Dipakai `start()` (sesi
+    /// baru) & `sync()` (setelah edit struktural — worker lama diminta
+    /// `Cmd::Quit` oleh caller sebelum memanggil ini).
+    fn spawn_worker(
+        flow_cfg: &FlowConfig,
+        env: &EnvConfig,
+        reveal_tokens: bool,
+        timeout: u64,
+        steps: Vec<FlowStep>,
+        edges: &[FlowEdge],
+        start: usize,
+    ) -> (Sender<Cmd>, Receiver<Evt>) {
+        let mut ctx = Ctx::build(flow_cfg, env.clone(), &[]);
+        ctx.reveal_tokens = reveal_tokens;
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<Cmd>();
+        let (evt_tx, evt_rx) = std::sync::mpsc::channel::<Evt>();
+        let total = steps.len();
+        // Adjacency per node utk graph-walk di worker.
+        let mut adjacency: Vec<Vec<FlowEdge>> = vec![Vec::new(); total];
+        for e in edges {
+            adjacency[e.from].push(e.clone());
+        }
+        std::thread::spawn(move || worker(ctx, steps, adjacency, start, timeout, cmd_rx, evt_tx));
+        (cmd_tx, evt_rx)
+    }
+
+    /// Re-derive SEMUA state turunan dari `self.mermaid_src` + `self.flow_cfg`
+    /// SAAT INI (belum tentu ke-Save ke disk): graph/geometry/scene (index
+    /// privat flowmaid dibangun ulang lewat reparse — lihat `graph_edit`) DAN
+    /// worker/run-state (`flow::load_from_str`, step-index bisa bergeser
+    /// kalau topologi berubah). Worker lama di-`Cmd::Quit`, run-state
+    /// (states/results/vars/log/pending/finished/selected) di-reset — edit
+    /// struktural ATAU config = soft-reset run, sama seperti klik "Reset"
+    /// tapi otomatis. Dipanggil oleh `commit` (edit topologi) & config
+    /// eksekusi (`flow_cfg` berubah langsung, mis. "Configure execution").
+    fn sync(&mut self) {
+        let label = self.mmd_path.display().to_string();
+        let parsed = match flow::load_from_str(&self.mermaid_src, &label, self.flow_cfg.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                self.edit_error = Some(format!("{e:#}"));
+                return;
+            }
+        };
+        let node_to_step: HashMap<String, usize> = parsed
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.node_id.clone(), i))
+            .collect();
+        // Snake cuma valid utk rantai linear — turunkan ke TD kalau topologi
+        // baru jadi bercabang.
+        let dir = if self.dir == LayoutDir::Snake && !parsed.linear {
+            LayoutDir::TD
+        } else {
+            self.dir
+        };
+        let (geo, scene, graph) = match build_geometry(&self.mermaid_src, &node_to_step, dir) {
+            Ok(v) => v,
+            Err(e) => {
+                self.edit_error = Some(format!("{e:#}"));
+                return;
+            }
+        };
+        let has_subgraphs = !graph.subgraphs.is_empty();
+        let meta: Vec<StepMeta> = parsed
+            .steps
+            .iter()
+            .map(|s| StepMeta {
+                node_id: s.node_id.clone(),
+                title: s.title.clone(),
+                role: role_of(s.cfg.auth.as_deref()),
+                endpoint: s.cfg.request.clone().unwrap_or_else(|| "(manual)".into()),
+                note: s.cfg.note.clone(),
+            })
+            .collect();
+        let total = parsed.steps.len();
+        let centers: Vec<(f64, f64)> = scene.nodes.iter().map(|n| (n.x, n.y)).collect();
+        let base_scene = scene.clone();
+
+        let _ = self.tx.send(Cmd::Quit);
+        let (tx, rx) = Session::spawn_worker(
+            &self.flow_cfg,
+            &self.env,
+            self.reveal_tokens,
+            self.timeout,
+            parsed.steps.clone(),
+            &parsed.edges,
+            parsed.start,
+        );
+
+        self.dir = dir;
+        self.graph = graph;
+        self.geo = geo;
+        self.scene = scene;
+        self.base_scene = base_scene;
+        self.centers = centers;
+        self.drag = None;
+        self.has_subgraphs = has_subgraphs;
+        self.node_to_step = node_to_step;
+        self.meta = meta;
+        self.total = total;
+        self.states = vec![NodeState::Idle; total];
+        self.results = vec![None; total];
+        self.vars = Vec::new();
+        self.selected = None;
+        self.selected_edge = None;
+        self.auto_running = false;
+        self.pending = None;
+        self.finished = false;
+        self.linear = parsed.linear;
+        self.tx = tx;
+        self.rx = rx;
+        self.edit_error = None;
+        self.logln(
+            "↺ topology/config changed — run reset".into(),
+            rgb(0xeab308),
+        );
+    }
+
+    /// Terapkan mutasi struktural `f` ke `self.graph`, lalu serialize→`sync`
+    /// (index privat `flowmaid::model::Graph` jadi basi kalau tidak — lihat
+    /// `graph_edit`). CATATAN: kalau edit ini butuh perubahan `flow_cfg` juga
+    /// (delete/rename node berconfig), lakukan itu SEBELUM memanggil
+    /// `commit` — `sync` di dalamnya akan gagal kalau `flow_cfg` sempat
+    /// mereferensikan node yang sudah tak ada di graph baru.
+    fn commit(&mut self, f: impl FnOnce(&mut flowmaid::model::Graph)) {
+        f(&mut self.graph);
+        self.mermaid_src = flowmaid::to_mermaid(&self.graph);
+        self.mmd_dirty = true;
+        self.sync();
+    }
+
+    fn select_node(&mut self, idx: usize) {
+        self.selected_edge = None;
+        self.context_menu = None;
+        self.edit_id = self.graph.nodes[idx].id.clone();
+        self.edit_label = self.graph.nodes[idx].label.clone();
+        self.selected = self.node_to_step.get(&self.graph.nodes[idx].id).copied();
+        self.edit_error = None;
+    }
+
+    fn select_edge(&mut self, idx: usize) {
+        self.selected = None;
+        self.context_menu = None;
+        self.selected_edge = Some(idx);
+        self.edge_label = self.graph.edges[idx].label.clone().unwrap_or_default();
+        self.edit_error = None;
+    }
+
+    fn confirm_add_node(&mut self) {
+        let id = self.new_node_id.trim().to_string();
+        if let Err(e) = graph_edit::validate_node_id(&id, &self.graph, None) {
+            self.edit_error = Some(e.to_string());
+            return;
+        }
+        let label = self.new_node_label.trim();
+        let label = if label.is_empty() {
+            id.clone()
+        } else {
+            label.to_string()
+        };
+        self.commit(|g| {
+            g.ensure_node(&id, Some(label), None);
+        });
+        self.show_add_node = false;
+        self.new_node_id.clear();
+        self.new_node_label.clear();
+    }
+
+    fn delete_selected_node(&mut self, idx: usize) {
+        if self.has_subgraphs {
+            self.edit_error = Some(
+                "this flow uses mermaid subgraphs — node delete isn't supported by the editor yet"
+                    .into(),
+            );
+            return;
+        }
+        let id = self.graph.nodes[idx].id.clone();
+        // WAJIB sebelum commit (lihat catatan `commit`): kalau entry
+        // flow.yaml-nya dibiarkan, `sync` di dalam `commit` akan gagal
+        // (referensi node yang sudah tak ada).
+        if self.flow_cfg.steps.remove(&id).is_some() {
+            self.cfg_dirty = true;
+        }
+        self.commit(|g| graph_edit::remove_node(g, idx));
+        self.context_menu = None;
+    }
+
+    fn delete_selected_edge(&mut self, idx: usize) {
+        self.commit(|g| graph_edit::remove_edge(g, idx));
+        self.context_menu = None;
+    }
+
+    fn confirm_rename_node(&mut self, idx: usize) {
+        let new_id = self.edit_id.trim().to_string();
+        if let Err(e) = graph_edit::validate_node_id(&new_id, &self.graph, Some(idx)) {
+            self.edit_error = Some(e.to_string());
+            return;
+        }
+        let old_id = self.graph.nodes[idx].id.clone();
+        let new_label = self.edit_label.trim().to_string();
+        if old_id != new_id {
+            if let Some(cfg) = self.flow_cfg.steps.remove(&old_id) {
+                self.flow_cfg.steps.insert(new_id.clone(), cfg);
+                self.cfg_dirty = true;
+            }
+        }
+        self.commit(|g| {
+            g.nodes[idx].id = new_id.clone();
+            if !new_label.is_empty() {
+                g.nodes[idx].label = new_label.clone();
+            }
+        });
+    }
+
+    fn confirm_edit_edge_label(&mut self, idx: usize) {
+        let label = self.edge_label.trim().to_string();
+        let label = if label.is_empty() { None } else { Some(label) };
+        self.commit(|g| g.edges[idx].label = label);
+    }
+
+    /// Selesaikan "Sambung": buat edge `connecting_from → to`, lalu pilih
+    /// edge barunya (urutan round-trip `to_mermaid` stabil → edge baru
+    /// selalu di posisi terakhir).
+    fn complete_connect(&mut self, from: usize, to: usize) {
+        self.commit(|g| {
+            g.add_edge(from, to, None, flowmaid::model::EdgeKind::Arrow);
+        });
+        if let Some(last) = self.graph.edges.len().checked_sub(1) {
+            self.select_edge(last);
+        }
+        self.connecting_from = None;
+    }
+
+    /// Buka popup "Configure execution" utk node `idx` — scratch field diisi
+    /// YAML dari entry `flow.yaml` saat ini (kosong/template kalau belum ada).
+    fn open_configure(&mut self, idx: usize) {
+        let id = self.graph.nodes[idx].id.clone();
+        let current = self.flow_cfg.steps.get(&id).cloned().unwrap_or_default();
+        self.cfg_form_text = serde_yaml::to_string(&current).unwrap_or_default();
+        self.show_configure = Some(idx);
+        self.context_menu = None;
+        self.edit_error = None;
+    }
+
+    /// Parse `cfg_form_text` sbg `StepConfig` & simpan ke `flow_cfg.steps` —
+    /// beda dgn `commit` (topologi), ini cuma menyentuh `flow_cfg`, TIDAK
+    /// `graph`/`mermaid_src`, tapi tetap panggil `sync` (meta/role/worker
+    /// perlu ikut menyesuaikan, mis. `auth` baru mengubah warna role).
+    fn confirm_configure_execution(&mut self, idx: usize) {
+        let id = self.graph.nodes[idx].id.clone();
+        match serde_yaml::from_str::<StepConfig>(&self.cfg_form_text) {
+            Ok(cfg) => {
+                self.flow_cfg.steps.insert(id, cfg);
+                self.cfg_dirty = true;
+                self.show_configure = None;
+                self.sync();
+            }
+            Err(e) => self.edit_error = Some(format!("invalid YAML: {e}")),
+        }
+    }
+
+    /// "Run this node" dari context-menu — translasi index graph → step lalu
+    /// pakai jalur eksekusi yang sudah ada (`Cmd::RunAt`, sama dgn re-run
+    /// manual yang lama).
+    fn run_this_node(&mut self, idx: usize) {
+        if let Some(step) = self.node_to_step.get(&self.graph.nodes[idx].id).copied() {
+            let _ = self.tx.send(Cmd::RunAt(step));
+        }
+        self.context_menu = None;
+    }
+
+    /// Tulis `.mmd` (selalu kalau `mmd_dirty`) dan `flow.yaml` (kalau
+    /// `cfg_dirty`) — state di memori sudah authoritative (disinkron tiap
+    /// edit via `sync`), jadi ini murni persist, tak perlu reparse ulang.
+    fn save(&mut self) -> anyhow::Result<()> {
+        if self.mmd_dirty {
+            std::fs::write(&self.mmd_path, &self.mermaid_src)
+                .map_err(|e| anyhow::anyhow!("write {}: {e}", self.mmd_path.display()))?;
+        }
+        if self.cfg_dirty {
+            config::save_flow_config(&self.cfg_path, &self.flow_cfg)?;
+        }
+        self.mmd_dirty = false;
+        self.cfg_dirty = false;
+        self.edit_status = Some("✅ saved".into());
+        Ok(())
     }
 
     fn logln(&mut self, text: String, color: egui::Color32) {
@@ -1624,6 +1975,19 @@ impl App {
         let sess = self.session.as_mut().expect("dicek pemanggil");
         sess.drain_events();
 
+        // Aksi edit topologi yg memanggil `commit`/`sync` (resize states/
+        // results/meta/total + restart worker) DIKUMPULKAN di sini, baru
+        // dieksekusi SEKALI di akhir fungsi — supaya tak ada kode di frame
+        // yg sama yang sempat membaca index step/graph yang sudah basi
+        // (mis. `sess.results[i]` di inspector, atau loop node di kanvas).
+        let mut act_rename: Option<usize> = None;
+        let mut act_delete_node: Option<usize> = None;
+        let mut act_delete_edge: Option<usize> = None;
+        let mut act_edit_edge_label: Option<usize> = None;
+        let mut act_add_node = false;
+        let mut act_connect_complete: Option<(usize, usize)> = None;
+        let mut act_configure_apply: Option<usize> = None;
+
         // ---- toolbar ----
         egui::TopBottomPanel::top("bar").show(ctx, |ui| {
             ui.add_space(4.0);
@@ -1654,6 +2018,33 @@ impl App {
                 }
                 if ui.button("↺ Reset").clicked() {
                     let _ = sess.tx.send(Cmd::Reset);
+                }
+                ui.separator();
+                if ui.button("＋ Node").clicked() {
+                    sess.show_add_node = true;
+                }
+                if let Some(cf) = sess.connecting_from {
+                    let from_id = sess.graph.nodes[cf].id.clone();
+                    ui.colored_label(
+                        accent(),
+                        format!("connecting from '{from_id}' — click target node (right-click to cancel)"),
+                    );
+                }
+                let dirty = sess.mmd_dirty || sess.cfg_dirty;
+                ui.add_enabled_ui(dirty, |ui| {
+                    if primary_button(ui, "💾 Save", 90.0).clicked() {
+                        if let Err(e) = sess.save() {
+                            sess.edit_error = Some(format!("{e:#}"));
+                        }
+                    }
+                });
+                if dirty {
+                    ui.colored_label(accent(), "● unsaved");
+                } else if let Some(s) = &sess.edit_status {
+                    ui.colored_label(rgb(0x22c55e), s.as_str());
+                }
+                if let Some(e) = sess.edit_error.clone() {
+                    ui.colored_label(rgb(0xf87171), format!("⚠ {e}"));
                 }
                 ui.separator();
                 let mut dir = sess.dir;
@@ -1943,6 +2334,44 @@ impl App {
                             });
                         });
 
+                        // ── edit topologi (klik-kanan node di kanvas jg buka ini) ──
+                        // Aksi yg mutasi topologi (Apply/Delete) DIKUMPULKAN dulu
+                        // (act_rename/act_delete_node), dieksekusi SETELAH seluruh
+                        // panel frame ini selesai render — method itu memanggil
+                        // `sync()` yang me-resize states/results/meta/total, jadi
+                        // tak aman dipanggil sementara `i`/`sess.results[i]` masih
+                        // dipakai kode setelahnya di frame yang sama.
+                        if let Some(gi) = sess.graph.node_index(&m.node_id) {
+                            section_label(ui, "edit");
+                            card(ui, |ui| {
+                                ui.label("id:");
+                                ui.text_edit_singleline(&mut sess.edit_id);
+                                ui.label("label:");
+                                ui.text_edit_singleline(&mut sess.edit_label);
+                                ui.horizontal(|ui| {
+                                    if ui.button("Apply").clicked() {
+                                        act_rename = Some(gi);
+                                    }
+                                    if ui.button("⚙ Configure execution").clicked() {
+                                        sess.open_configure(gi); // aman: tak resize apa pun
+                                    }
+                                });
+                                ui.add_space(6.0);
+                                let hover = if sess.has_subgraphs {
+                                    "this flow uses mermaid subgraphs — node delete isn't supported yet"
+                                } else {
+                                    "delete this node & every edge touching it"
+                                };
+                                if ui
+                                    .add_enabled(!sess.has_subgraphs, egui::Button::new("🗑 Delete node"))
+                                    .on_hover_text(hover)
+                                    .clicked()
+                                {
+                                    act_delete_node = Some(gi);
+                                }
+                            });
+                        }
+
                         // ── hasil eksekusi ──
                         if let Some(r) = &sess.results[i] {
                             section_label(ui, "result");
@@ -2038,13 +2467,35 @@ impl App {
                                 });
                             });
                         }
+                    } else if let Some(ei) = sess.selected_edge {
+                        let e = sess.graph.edges[ei].clone();
+                        let from = sess.graph.nodes[e.from].id.clone();
+                        let to = sess.graph.nodes[e.to].id.clone();
+                        card(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{from} → {to}"))
+                                    .size(14.0)
+                                    .strong(),
+                            );
+                            ui.add_space(6.0);
+                            ui.small("condition (empty = unconditional; var == value / != value; or `else`):");
+                            ui.text_edit_singleline(&mut sess.edge_label);
+                            ui.horizontal(|ui| {
+                                if ui.button("Apply").clicked() {
+                                    act_edit_edge_label = Some(ei);
+                                }
+                                if ui.button("🗑 Delete edge").clicked() {
+                                    act_delete_edge = Some(ei);
+                                }
+                            });
+                        });
                     } else {
                         card(ui, |ui| {
                             ui.vertical_centered(|ui| {
                                 ui.add_space(14.0);
                                 ui.label(egui::RichText::new("\u{1f446}").size(20.0));
                                 ui.label(
-                                    egui::RichText::new("click a node to inspect")
+                                    egui::RichText::new("click a node/edge to inspect \u{00b7} right-click a node to edit")
                                         .color(rgb(0x8b93a7)),
                                 );
                                 ui.add_space(14.0);
@@ -2117,6 +2568,64 @@ impl App {
             }
             let title = sess.meta[t].title.clone();
             sess.logln(format!("↪ branch chosen: {title}"), rgb(0xeab308));
+        }
+
+        // ---- popup "+ Node" ----
+        if sess.show_add_node {
+            egui::Window::new("＋ New node")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("id");
+                        ui.text_edit_singleline(&mut sess.new_node_id);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("label");
+                        ui.text_edit_singleline(&mut sess.new_node_label);
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Add").clicked() {
+                            act_add_node = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            sess.show_add_node = false;
+                        }
+                    });
+                });
+        }
+
+        // ---- popup "Configure execution" (raw YAML — cover semua field
+        // StepConfig sekaligus: auth/request/headers/body/capture/assert/
+        // skip_if/manual/note — tanpa perlu form per-field) ----
+        if let Some(gi) = sess.show_configure {
+            let title = format!("⚙ Configure — {}", sess.graph.nodes[gi].id);
+            egui::Window::new(title)
+                .collapsible(false)
+                .resizable(true)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, -20.0])
+                .show(ctx, |ui| {
+                    ui.small("YAML StepConfig (auth/request/headers/body/capture/assert/skip_if/manual/note)");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut sess.cfg_form_text)
+                            .code_editor()
+                            .desired_rows(14)
+                            .desired_width(420.0),
+                    );
+                    if let Some(e) = &sess.edit_error {
+                        ui.colored_label(rgb(0xf87171), format!("⚠ {e}"));
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Apply").clicked() {
+                            act_configure_apply = Some(gi);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            sess.show_configure = None;
+                            sess.edit_error = None;
+                        }
+                    });
+                });
         }
 
         // ---- canvas ----
@@ -2340,6 +2849,58 @@ impl App {
                 }
             }
 
+            // klik-kanan: buka context-menu edit (Run/Configure/Connect/Delete).
+            // Hit-test dihitung sendiri (bukan lewat closure context_menu, yg
+            // tak tahu node mana) & disimpan ke `sess.context_menu`; klik-kanan
+            // di area kosong = batal (juga membatalkan mode Sambung).
+            if resp.secondary_clicked()
+                && let Some(pos) = resp.interact_pointer_pos()
+            {
+                let sp = (pos - base) / zoom;
+                let tol = (6.0 / zoom) as f64;
+                match sess.scene.hit_test(sp.x as f64, sp.y as f64, tol) {
+                    Some(flowmaid::scene::Hit::Node(i)) => sess.context_menu = Some(i),
+                    _ => {
+                        sess.context_menu = None;
+                        sess.connecting_from = None;
+                    }
+                }
+            }
+            resp.context_menu(|ui| {
+                if let Some(gi) = sess.context_menu {
+                    let node_id = sess.graph.nodes[gi].id.clone();
+                    ui.label(egui::RichText::new(&node_id).strong().monospace());
+                    ui.separator();
+                    if ui.button("▶ Run this node").clicked() {
+                        sess.run_this_node(gi); // aman: cuma tx.send, tak resize
+                        ui.close_menu();
+                    }
+                    if ui.button("⚙ Configure execution").clicked() {
+                        sess.open_configure(gi); // aman: cuma buka popup
+                        ui.close_menu();
+                    }
+                    if ui.button("🔗 Connect from here").clicked() {
+                        sess.connecting_from = Some(gi);
+                        sess.context_menu = None;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    let del_hover = if sess.has_subgraphs {
+                        "this flow uses mermaid subgraphs — node delete isn't supported yet"
+                    } else {
+                        "delete this node & every edge touching it"
+                    };
+                    if ui
+                        .add_enabled(!sess.has_subgraphs, egui::Button::new("🗑 Delete node"))
+                        .on_hover_text(del_hover)
+                        .clicked()
+                    {
+                        act_delete_node = Some(gi); // di-defer: commit/sync me-resize array
+                        ui.close_menu();
+                    }
+                }
+            });
+
             if resp.clicked()
                 && let Some(pos) = resp.interact_pointer_pos()
             {
@@ -2349,18 +2910,50 @@ impl App {
                 let tol = (6.0 / zoom) as f64;
                 match sess.scene.hit_test(sp.x as f64, sp.y as f64, tol) {
                     Some(flowmaid::scene::Hit::Node(i)) => {
-                        let step = sess.node_to_step.get(&sess.scene.nodes[i].id).copied();
-                        sess.selected = step;
+                        if let Some(from) = sess.connecting_from {
+                            if from == i {
+                                sess.connecting_from = None; // klik node sumber lagi = batal
+                            } else {
+                                act_connect_complete = Some((from, i)); // di-defer
+                            }
+                        } else {
+                            sess.select_node(i);
+                        }
                     }
                     Some(flowmaid::scene::Hit::Edge(i)) => {
-                        // Klik konektor → pilih step SUMBER-nya (inspeksi transisi).
-                        let step = sess.node_to_step.get(&sess.scene.edges[i].from).copied();
-                        sess.selected = step;
+                        if sess.connecting_from.is_none() {
+                            sess.select_edge(i);
+                        }
                     }
                     _ => {}
                 }
             }
         });
+
+        // Terapkan aksi edit topologi yg dikumpulkan sepanjang frame ini —
+        // SEKARANG aman, tak ada lagi kode di bawah yg baca index step/graph
+        // lama (lihat catatan deklarasi act_* di awal fungsi).
+        if act_add_node {
+            sess.confirm_add_node();
+        }
+        if let Some(gi) = act_rename {
+            sess.confirm_rename_node(gi);
+        }
+        if let Some(gi) = act_delete_node {
+            sess.delete_selected_node(gi);
+        }
+        if let Some(ei) = act_delete_edge {
+            sess.delete_selected_edge(ei);
+        }
+        if let Some(ei) = act_edit_edge_label {
+            sess.confirm_edit_edge_label(ei);
+        }
+        if let Some((from, to)) = act_connect_complete {
+            sess.complete_connect(from, to);
+        }
+        if let Some(gi) = act_configure_apply {
+            sess.confirm_configure_execution(gi);
+        }
 
         ctx.request_repaint_after(Duration::from_millis(60));
 

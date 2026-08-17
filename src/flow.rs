@@ -57,8 +57,17 @@ impl Flow {
 pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
     let src = std::fs::read_to_string(mmd_path)
         .with_context(|| format!("read {}", mmd_path.display()))?;
+    load_from_str(&src, &mmd_path.display().to_string(), cfg)
+}
+
+/// Sama seperti `load()`, tapi dari teks mermaid yang sudah ada di memori
+/// (belum tentu tersimpan di disk) — dipakai GUI utk rebuild eksekusi
+/// setelah edit struktural yang belum di-Save. `src_label` cuma dipakai
+/// utk pesan error (nama file kalau ada, atau placeholder).
+pub fn load_from_str(src: &str, src_label: &str, cfg: FlowConfig) -> Result<Flow> {
+    let src = src.to_string();
     let graph = match flowmaid::parser::parse_document(&src)
-        .map_err(|e| anyhow::anyhow!("parse mermaid {}: {e:?}", mmd_path.display()))?
+        .map_err(|e| anyhow::anyhow!("parse mermaid {src_label}: {e:?}"))?
     {
         Document::Flowchart(g) | Document::State(g) => g,
         other => bail!(
@@ -67,7 +76,7 @@ pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
         ),
     };
     if graph.nodes.is_empty() {
-        bail!("empty flow: no nodes in {}", mmd_path.display());
+        bail!("empty flow: no nodes in {src_label}");
     }
 
     let n = graph.nodes.len();
@@ -267,5 +276,35 @@ mod tests {
         let err = load(&p, cfg).unwrap_err().to_string();
         std::fs::remove_file(&p).ok();
         assert!(err.contains("zzz"), "{err}");
+    }
+
+    /// Smoke test pipeline penuh (editor → runner): node dihapus lewat
+    /// `graph_edit::remove_node` + `flowmaid::to_mermaid`, tapi `flow.yaml`
+    /// LAMA (belum disinkron) tetap dipakai — `load()` yang sudah ada harus
+    /// tetap menangkapnya, independen dari kode auto-sinkron flow.yaml baru
+    /// di editor GUI.
+    #[test]
+    fn detects_mismatch_after_editor_removes_node() {
+        let mmd_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wacca-order/flow.mmd");
+        let cfg_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/wacca-order/flow.yaml");
+        let original_cfg = crate::config::load_flow_config(&cfg_path).unwrap();
+
+        let mmd_src = std::fs::read_to_string(&mmd_path).unwrap();
+        let mut graph = match flowmaid::parser::parse_document(&mmd_src).unwrap() {
+            Document::Flowchart(g) | Document::State(g) => g,
+            _ => panic!("harap flowchart"),
+        };
+        // n13 = leaf (node terakhir rantai linear) — hapus TANPA memutus
+        // konektivitas node lain, supaya yang teruji murni mismatch
+        // flow.yaml, bukan validasi DAG/start-node lain yang tak terkait.
+        let victim = graph.node_index("n13").expect("n13 ada di contoh wacca-order");
+        crate::graph_edit::remove_node(&mut graph, victim);
+        let new_mmd = flowmaid::to_mermaid(&graph);
+
+        let p = write_tmp("editor-removed-node", &new_mmd);
+        let err = load(&p, original_cfg).unwrap_err().to_string();
+        std::fs::remove_file(&p).ok();
+        assert!(err.contains("not found in flow.mmd"), "{err}");
+        assert!(err.contains("n13"), "{err}");
     }
 }
