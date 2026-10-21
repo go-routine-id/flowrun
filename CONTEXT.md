@@ -2,7 +2,7 @@
 
 > Dokumen ini ditulis agar sesi Claude (atau engineer) berikutnya bisa lanjut
 > tanpa menggali dari nol. Update dokumen ini setiap kali ada keputusan/fitur besar.
-> Terakhir diperbarui: 18 Jul 2026 (v0.2.0 + premium UI + multi-service, log collapsible, UI 100% English).
+> Terakhir diperbarui: 21 Okt 2026 (sinkron dgn kode pasca-migrasi laptop: flowmaid 0.27.0, drag node + `flow.layout.yaml`, editor `.mmd`, 26 test).
 
 ## Apa ini & filosofi
 
@@ -25,12 +25,14 @@ Tiga pemisahan yang DISENGAJA (jangan dicampur lagi):
 | SVG status live (`--svg`) + preview server mini (`--serve`) | ✅ |
 | **Desktop egui** (`flowrun-gui`, feature `gui`): picker file + recent + editor koneksi/token/vars di UI, canvas pan/zoom/follow, panah, label wrap+fit, pulse node aktif, badge role, log panel, JSON tree, copy, "⟳ Hit node ini" (re-run per node) | ✅ |
 | **Premium UI (18 Jul)**: tema global gelap + aksen emas ⚡ (`apply_theme`), font fallback lintas-OS agar glyph → ◇ ⟳ tak jadi tofu (`apply_fonts`). Picker ditata ulang: latar gradien+grid, kolom terpusat 660px, hero, kartu `card_lg`, tombol utama, recent klik. Field koneksi kolom-label seragam (`LBL_W=150`, kiri-rata) + `vars seed` toggle manual (bukan `collapsing` yg indent) + baris right-to-left agar field & ikon rata | ✅ |
-| Layout: 🐍 **Ular/serpentine** (default utk rantai linear — flow panjang muat layar), ⇉ LR, ⇊ TD | ✅ |
+| Layout: 🐍 **Ular/serpentine** (default utk rantai linear — flow panjang muat layar; sejak 18 Jul via `flowmaid::fold::scene_compact`, grid tangan dihapus), ⇉ LR, ⇊ TD | ✅ |
+| **Pick & drag node (19 Jul)**: klik node/edge via `Scene::hit_test` (hitbox manual dibuang); drag node di layar run → `scene::route_partial` me-reroute edge terdampak; posisi yg DIGESER auto-save ke sidecar `flow.layout.yaml` (di sebelah `flow.mmd`, DI-COMMIT agar arrangement dibagi) dan diterapkan di atas layout auto saat load | ✅ |
+| **Editor topologi `.mmd` (Agu 2026, commit backup `1f0ccbe`)**: tombol "📝 Edit .mmd" di picker → layar `Editor` terpisah dari `Session` (tanpa worker/HTTP). Tambah node (pilih role Customer/Owner → `style fill`), hapus/rename node, mode "Sambung" utk tambah edge, hapus edge, edit label kondisi edge, Save. Delete/rename node ikut menyinkron `steps` di `flow.yaml` (opsional). Mutasi via `src/graph_edit.rs` + `flowmaid::to_mermaid` | 🟡 sebagian — drag-reposisi di layar editor BELUM; hapus node dinonaktifkan bila `.mmd` pakai `subgraph` |
 | **Percabangan (v0.2)**: kondisi = label edge mermaid (`-->\|pay_mode == cod\|`, `\|else\|` = fallback); GUI modal pilih cabang saat ambigu; `--auto` gagal deterministik; node tak dilalui diredupkan | ✅ |
 | **Multi-service (18 Jul)**: `request:` boleh URL absolut (mis. `{{payment_base}}/...`) → satu flow menembus >1 service tanpa hardcode host (host service kedua dari var env file). Path relatif tetap `base_url + path`. Kunci untuk uji pembayaran digital (wacca `:7281` + payment-service `:7282`) | ✅ |
 | **Log collapsible (18 Jul)**: detail payload/response tiap step default TERTUTUP; klik satu entri = buka satu (`push_id(i)` per baris cegah tabrakan ID egui); tombol "expand all/collapse all" di header log | ✅ |
 | **UI 100% English (18 Jul)**: seluruh string GUI + CLI (`--help` clap) + pesan engine/flow/config error ke bahasa Inggris. Komentar kode SENGAJA tetap Indonesia (tak tampil ke user) | ✅ |
-| Unit test 15/15 (parser, engine, cabang, mock HTTP via std TcpListener) | ✅ |
+| Unit test 26/26 (parser, engine, cabang, mock HTTP via std TcpListener, `graph_edit`, round-trip `save_flow_config`, mismatch editor→runner) — hijau 21 Okt 2026 di laptop baru | ✅ |
 
 **SUDAH diuji e2e ke backend nyata** (17 Jul 2026): 16/16 langkah hijau
 melawan wacca-service terbaru + DB dev — order COD customer↔owner sampai
@@ -71,6 +73,7 @@ src/lib.rs            # re-export modul core (dipakai kedua bin)
 src/config.rs         # schema flow.yaml + env file (serde_yaml)
 src/flow.rs           # parse .mmd via flowmaid → DAG (steps topo-order, edges+cond, start, linear)
 src/engine.rs         # runner: template/capture/assert/skip_if + choose_next (cabang)
+src/graph_edit.rs     # hapus node/edge + validasi id utk editor GUI (flowmaid belum punya remove)
 src/diagram.rs        # regen mermaid + classDef status → render_svg; preview server
 src/runner_ui.rs      # state UI CLI (SVG live + print report)
 src/interactive.rs    # loop next-next CLI (graph-walk, tanya cabang bernomor)
@@ -78,13 +81,15 @@ src/main.rs           # CLI clap (run/render, --auto deterministik)
 src/bin/flowrun_gui.rs# desktop egui (semua UI; worker thread graph-walker)
 examples/wacca-order/          # contoh linear 14 langkah (+ mock-env.yaml utk mock)
 examples/wacca-order-branched/ # contoh bercabang (keputusan/terima-tolak, cod/digital)
+examples/wacca-order-va/       # order + pembayaran VA digital LINEAR (+ flow-charge: berhenti di charge QRIS)
+examples/*/flow.layout.yaml    # posisi node hasil drag (sidecar visual, di-commit)
 tools/wacca_mock.py            # mock backend wacca (python stdlib) utk dev UI/demo
 ```
 
 ## Cara kerja cepat (dev)
 
 ```sh
-cargo test                                   # 15 unit test
+cargo test                                   # 26 unit test
 python3 tools/wacca_mock.py 18923 &          # mock backend (BUGGY=1 = simulasi regresi)
 cargo run -- run -f examples/wacca-order/flow.mmd -c examples/wacca-order/flow.yaml \
   -e examples/wacca-order/mock-env.yaml --auto            # CLI e2e vs mock
@@ -97,9 +102,9 @@ Jalur cabang diganti tanpa mengubah graf: `--var keputusan=tolak`, `--var pay_mo
 ## Keputusan desain penting (dan alasannya — jangan diulang debatnya)
 
 - **Rust native, bukan web**: keputusan owner. Bonus: tanpa CORS (bukan fetch browser), `--auto` = test CI satu binary.
-- **flowmaid sebagai library**: parse (`parser::parse_document` → `Document::Flowchart(Graph)`), layout+geometri (`scene::scene(&Graph)` → `SceneNode{x,y,w,h}`, `SceneEdge{bezier/waypoints}`), `render_svg`. `Graph.direction` bisa dioverride (LR/TD) sebelum `scene()`. Versi terpasang 0.17.0.
+- **flowmaid sebagai library**: parse (`parser::parse_document` → `Document::Flowchart(Graph)`), layout+geometri (`scene::scene(&Graph)` → `SceneNode{x,y,w,h}`, `SceneEdge{bezier/waypoints}`), `render_svg`. `Graph.direction` bisa dioverride (LR/TD) sebelum `scene()`. Juga dipakai: `fold::scene_compact` (Ular), `Scene::hit_test` (pick), `scene::route_partial` (drag), `to_mermaid` (editor tulis ulang `.mmd`). Versi terpasang **0.27.0** (crates.io, naik dari 0.20.1 pada 21 Okt 2026; CLI+GUI compile tanpa ubah kode, 26 test hijau).
 - **Lisensi GPL-3.0-or-later** — konsekuensi link ke flowmaid (GPL). Sadari ini bila mau relicense.
-- **Layout Ular** = milik flowrun, BUKAN flowmaid: layout berlapis (Sugiyama — flowmaid & mermaid.js sama) merender rantai linear sebagai pita panjang; serpentine melipatnya agar muat layar. Hanya valid utk graf linear (`Flow.linear`) — otomatis disembunyikan utk graf bercabang.
+- **Layout Ular** = kebutuhan flowrun (sejak flowmaid ≥0.18 dikerjakan `fold::scene_compact`, bukan grid tangan lagi): layout berlapis (Sugiyama — flowmaid & mermaid.js sama) merender rantai linear sebagai pita panjang; serpentine melipatnya agar muat layar. Hanya valid utk graf linear (`Flow.linear`) — otomatis disembunyikan utk graf bercabang.
 - **Semantik cabang**: kondisi di label edge (`var == nilai` / `!=`; `else`/kosong = fallback). Tepat satu true → jalan; ambigu → GUI bertanya, `--auto` FAIL (test tak boleh menebak). Satu jalur aktif; **fan-out paralel sengaja ditunda** (merge context vars ribet, kebutuhan belum nyata).
 - **Graf wajib DAG** — siklus ditolak saat load (retry/loop = ranah engine, bukan graf).
 - **Fail-fast token kosong** — token profil kosong dulunya lolos diam-diam sbg `Bearer ` (ditemukan saat demo); kini error sebelum flow jalan.
@@ -112,7 +117,9 @@ Jalur cabang diganti tanpa mengubah graf: `--var keputusan=tolak`, `--var pay_mo
 - Font label GUI HARUS mengikuti zoom penuh + fit-check (jangan kasih floor px — pernah bikin teks luber keluar node saat zoom-out).
 - Test file temp wajib nama unik per test (cargo test paralel satu proses).
 - `LayoutJob::simple` + `wrap.max_rows` + `halign=Center`, gambar via `painter.galley(pos, galley, color)` dgn pos = center − size/2.
-- flowmaid `scene.nodes[i]` SEJAJAR `graph.nodes[i]` (map id → step via indeks).
+- ~~flowmaid `scene.nodes[i]` sejajar `graph.nodes[i]`~~ — SUDAH TIDAK diandalkan: sejak commit `8ece20e` scene→step dipetakan **by id**. Jangan kembali ke asumsi indeks paralel.
+- **`graph_edit` + index privat flowmaid**: `Graph` punya `index: HashMap` privat; `remove_node` menggeser posisi node → `node_index()` basi. WAJIB serialize→reparse (`to_mermaid` → `parse_document`) sesudah tiap mutasi struktural (`Editor::commit` melakukannya). Subgraph member belum di-reindex → hapus node dimatikan bila ada `subgraph`.
+- **`save_flow_config` = canonical rewrite**: komentar/urutan/format asli `flow.yaml` HILANG saat editor menyinkron `steps` (begitu juga `.mmd` via `to_mermaid`). Hanya terjadi saat delete/rename node yg punya entry.
 - **Tofu glyph (□)**: font default egui (Ubuntu-Light) TAK punya `→`(U+2192), `◇`(U+25C7), `⟳`(U+27F3), `⤢`(U+2922, tombol Fit), dst. Fix = `apply_fonts()` memuat **SEMUA** kandidat font sistem yang ada (bukan berhenti di font pertama!) sbg fallback — cakupan = GABUNGAN. Di macOS *Arial Unicode* (BMP luas) TAK punya sebagian panah spt ⤢ (Supplemental Arrows-B); *Apple Symbols* menutupnya. Cek cakupan codepoint via cmap sebelum pilih glyph. Teks Latin tetap font default.
 - **Rata field egui**: JANGAN hitung lebar via `available_width() - N` per baris (nilainya bergeser → tak rata). Pakai `Layout::right_to_left` (tombol/ikon dikunci kanan, TextEdit `desired_width(available_width())` mengisi sisa). Kolom label: lebar seragam + `allocate_ui_with_layout(left_to_right)` agar kiri-rata. `collapsing` MENG-INDENT isinya → untuk field yg harus sejajar dgn luar, pakai toggle bool manual.
 - **Widget klik dalam loop (egui)**: `Label`/tombol ber-`sense(click)` yang diulang dalam loop bisa BERTABRAKAN ID (auto-id) → klik satu nyasar ke widget lain (mis. klik entri log malah men-trigger tombol "expand all"). Fix: bungkus tiap iterasi dengan `ui.push_id(i, |ui| { ... })` agar tiap baris punya namespace ID sendiri.
@@ -126,7 +133,7 @@ Jalur cabang diganti tanpa mengubah graf: `--var keputusan=tolak`, `--var pay_mo
 4. Step type **webhook-sim** (HMAC payment.paid) — untuk wacca sudah tercakup via step `simulate-paid` ke payment-service (pakai fitur URL-absolut); webhook-sim generik (HMAC dari flowrun sendiri) masih berguna utk provider lain.
 5. Kondisi lebih kaya (`>`, `<`, `contains`, dot-path di kiri), capture dari header/status.
 6. Loop/retry (polling sampai kondisi — mis. tunggu `paid`) tanpa merusak DAG visual.
-7. Editor graf drag-and-drop (flowmaid scene API sudah menyediakan geometri interaktif).
+7. Editor graf: ✅ sebagian (topologi + drag di layar run). Sisa: drag-reposisi di layar `Editor`, dukung hapus node ber-`subgraph`, pertahankan komentar `flow.yaml` saat sinkron.
 
 ## Konvensi repo
 
