@@ -28,11 +28,12 @@ Tiga pemisahan yang DISENGAJA (jangan dicampur lagi):
 | Layout: 🐍 **Ular/serpentine** (default utk rantai linear — flow panjang muat layar; sejak 18 Jul via `flowmaid::fold::scene_compact`, grid tangan dihapus), ⇉ LR, ⇊ TD | ✅ |
 | **Pick & drag node (19 Jul)**: klik node/edge via `Scene::hit_test` (hitbox manual dibuang); drag node di layar run → `scene::route_partial` me-reroute edge terdampak; posisi yg DIGESER auto-save ke sidecar `flow.layout.yaml` (di sebelah `flow.mmd`, DI-COMMIT agar arrangement dibagi) dan diterapkan di atas layout auto saat load | ✅ |
 | **Editor topologi `.mmd` (Agu 2026, commit backup `1f0ccbe`)**: tombol "📝 Edit .mmd" di picker → layar `Editor` terpisah dari `Session` (tanpa worker/HTTP). Tambah node (pilih role Customer/Owner → `style fill`), hapus/rename node, mode "Sambung" utk tambah edge, hapus edge, edit label kondisi edge, Save. Delete/rename node ikut menyinkron `steps` di `flow.yaml` (opsional). Mutasi via `src/graph_edit.rs` + `flowmaid::to_mermaid` | 🟡 sebagian — drag-reposisi di layar editor BELUM; hapus node dinonaktifkan bila `.mmd` pakai `subgraph` |
+| **Editor kode (Nov 2026)**: layar "⌨ Code" (masuk dari picker, layar run, atau editor visual) → teks mentah `flow.mmd` + `flow.yaml` (tab, nomor baris, highlight, baris ber-error merah) kiri + preview graf live kanan (debounce 350 ms; preview valid terakhir tetap tampil saat .mmd rusak). Panel *Problems*: error parse per baris + validasi silang via `src/code_check.rs` (steps tak dikenal, auth bukan anggota `auth_profiles`, format `request`, kondisi edge, `skip_if`, DAG/start). Klik node → lompat ke `steps.<id>` atau "＋ Create entry" (kerangka). Save menulis teks APA ADANYA (komentar terjaga), ditolak bila parse gagal; ⌘S; Revert; dialog unsaved saat keluar. Tiap masuk layar membaca ulang file dari disk; editor visual yg dirty wajib di-save dulu | ✅ (belum diuji manual oleh owner) |
 | **Percabangan (v0.2)**: kondisi = label edge mermaid (`-->\|pay_mode == cod\|`, `\|else\|` = fallback); GUI modal pilih cabang saat ambigu; `--auto` gagal deterministik; node tak dilalui diredupkan | ✅ |
 | **Multi-service (18 Jul)**: `request:` boleh URL absolut (mis. `{{payment_base}}/...`) → satu flow menembus >1 service tanpa hardcode host (host service kedua dari var env file). Path relatif tetap `base_url + path`. Kunci untuk uji pembayaran digital (wacca `:7281` + payment-service `:7282`) | ✅ |
 | **Log collapsible (18 Jul)**: detail payload/response tiap step default TERTUTUP; klik satu entri = buka satu (`push_id(i)` per baris cegah tabrakan ID egui); tombol "expand all/collapse all" di header log | ✅ |
 | **UI 100% English (18 Jul)**: seluruh string GUI + CLI (`--help` clap) + pesan engine/flow/config error ke bahasa Inggris. Komentar kode SENGAJA tetap Indonesia (tak tampil ke user) | ✅ |
-| Unit test 26/26 (parser, engine, cabang, mock HTTP via std TcpListener, `graph_edit`, round-trip `save_flow_config`, mismatch editor→runner) — hijau 21 Okt 2026 di laptop baru | ✅ |
+| Unit test 36/36 (parser, engine, cabang, mock HTTP via std TcpListener, `graph_edit`, round-trip `save_flow_config`, mismatch editor→runner, `code_check`) — hijau 3 Nov 2026 | ✅ |
 
 **SUDAH diuji e2e ke backend nyata** (17 Jul 2026): 16/16 langkah hijau
 melawan wacca-service terbaru + DB dev — order COD customer↔owner sampai
@@ -71,7 +72,8 @@ BUKAN `order_lists`); body `{}` utk final-price & confirm-cod valid (opsional).
 ```
 src/lib.rs            # re-export modul core (dipakai kedua bin)
 src/config.rs         # schema flow.yaml + env file (serde_yaml)
-src/flow.rs           # parse .mmd via flowmaid → DAG (steps topo-order, edges+cond, start, linear)
+src/flow.rs           # parse .mmd via flowmaid → DAG (steps topo-order, edges+cond, start, linear); `load_src` = dari teks di memori
+src/code_check.rs     # validasi draft teks .mmd+.yaml (diagnosa per baris) + lokasi/kerangka `steps.<id>` utk editor kode
 src/engine.rs         # runner: template/capture/assert/skip_if + choose_next (cabang)
 src/graph_edit.rs     # hapus node/edge + validasi id utk editor GUI (flowmaid belum punya remove)
 src/diagram.rs        # regen mermaid + classDef status → render_svg; preview server
@@ -89,7 +91,7 @@ tools/wacca_mock.py            # mock backend wacca (python stdlib) utk dev UI/d
 ## Cara kerja cepat (dev)
 
 ```sh
-cargo test                                   # 26 unit test
+cargo test                                   # 36 unit test
 python3 tools/wacca_mock.py 18923 &          # mock backend (BUGGY=1 = simulasi regresi)
 cargo run -- run -f examples/wacca-order/flow.mmd -c examples/wacca-order/flow.yaml \
   -e examples/wacca-order/mock-env.yaml --auto            # CLI e2e vs mock
@@ -119,7 +121,9 @@ Jalur cabang diganti tanpa mengubah graf: `--var keputusan=tolak`, `--var pay_mo
 - `LayoutJob::simple` + `wrap.max_rows` + `halign=Center`, gambar via `painter.galley(pos, galley, color)` dgn pos = center − size/2.
 - ~~flowmaid `scene.nodes[i]` sejajar `graph.nodes[i]`~~ — SUDAH TIDAK diandalkan: sejak commit `8ece20e` scene→step dipetakan **by id**. Jangan kembali ke asumsi indeks paralel.
 - **`graph_edit` + index privat flowmaid**: `Graph` punya `index: HashMap` privat; `remove_node` menggeser posisi node → `node_index()` basi. WAJIB serialize→reparse (`to_mermaid` → `parse_document`) sesudah tiap mutasi struktural (`Editor::commit` melakukannya). Subgraph member belum di-reindex → hapus node dimatikan bila ada `subgraph`.
-- **`save_flow_config` = canonical rewrite**: komentar/urutan/format asli `flow.yaml` HILANG saat editor menyinkron `steps` (begitu juga `.mmd` via `to_mermaid`). Hanya terjadi saat delete/rename node yg punya entry.
+- **`save_flow_config` = canonical rewrite**: komentar/urutan/format asli `flow.yaml` HILANG saat editor VISUAL menyinkron `steps` (begitu juga `.mmd` via `to_mermaid`). Hanya terjadi saat delete/rename node yg punya entry. Editor kode (⌨ Code) TIDAK kena — ia menyimpan teks mentah; arahkan user ke sana bila komentar penting.
+- **Error `flow::load` sengaja `map_err` + `{e:#}`, bukan `with_context`**: `with_context` menyembunyikan pesan akar di `Display` → test `rejects_cycle` (cek `"cyclic"`) gagal. Path ditambah oleh `load`, `load_src` tanpa path.
+- **`Picker::reload_draft` MENIMPA token yang sudah diketik** → jangan dipanggil saat kembali dari editor kode; pakai `sync_profiles` (hanya menambah profil baru).
 - **Tofu glyph (□)**: font default egui (Ubuntu-Light) TAK punya `→`(U+2192), `◇`(U+25C7), `⟳`(U+27F3), `⤢`(U+2922, tombol Fit), dst. Fix = `apply_fonts()` memuat **SEMUA** kandidat font sistem yang ada (bukan berhenti di font pertama!) sbg fallback — cakupan = GABUNGAN. Di macOS *Arial Unicode* (BMP luas) TAK punya sebagian panah spt ⤢ (Supplemental Arrows-B); *Apple Symbols* menutupnya. Cek cakupan codepoint via cmap sebelum pilih glyph. Teks Latin tetap font default.
 - **Rata field egui**: JANGAN hitung lebar via `available_width() - N` per baris (nilainya bergeser → tak rata). Pakai `Layout::right_to_left` (tombol/ikon dikunci kanan, TextEdit `desired_width(available_width())` mengisi sisa). Kolom label: lebar seragam + `allocate_ui_with_layout(left_to_right)` agar kiri-rata. `collapsing` MENG-INDENT isinya → untuk field yg harus sejajar dgn luar, pakai toggle bool manual.
 - **Widget klik dalam loop (egui)**: `Label`/tombol ber-`sense(click)` yang diulang dalam loop bisa BERTABRAKAN ID (auto-id) → klik satu nyasar ke widget lain (mis. klik entri log malah men-trigger tombol "expand all"). Fix: bungkus tiap iterasi dengan `ui.push_id(i, |ui| { ... })` agar tiap baris punya namespace ID sendiri.
@@ -133,7 +137,7 @@ Jalur cabang diganti tanpa mengubah graf: `--var keputusan=tolak`, `--var pay_mo
 4. Step type **webhook-sim** (HMAC payment.paid) — untuk wacca sudah tercakup via step `simulate-paid` ke payment-service (pakai fitur URL-absolut); webhook-sim generik (HMAC dari flowrun sendiri) masih berguna utk provider lain.
 5. Kondisi lebih kaya (`>`, `<`, `contains`, dot-path di kiri), capture dari header/status.
 6. Loop/retry (polling sampai kondisi — mis. tunggu `paid`) tanpa merusak DAG visual.
-7. Editor graf: ✅ sebagian (topologi + drag di layar run). Sisa: drag-reposisi di layar `Editor`, dukung hapus node ber-`subgraph`, pertahankan komentar `flow.yaml` saat sinkron.
+7. Editor graf: ✅ sebagian (topologi + drag di layar run). Sisa: drag-reposisi di layar `Editor`, dukung hapus node ber-`subgraph`, pertahankan komentar `flow.yaml` saat sinkron visual (editor kode sudah jadi jalan alternatif yg menjaga komentar). Editor kode: belum ada undo lintas-save, find/replace, autocomplete id node.
 
 ## Konvensi repo
 

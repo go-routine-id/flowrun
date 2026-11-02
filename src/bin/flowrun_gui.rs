@@ -5,7 +5,7 @@
 //! Pembagian peran: flowmaid = layout graf · egui = render + kontrol ·
 //! engine flowrun = eksekusi HTTP (worker thread, UI tetap responsif).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -14,6 +14,7 @@ use clap::Parser;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
+use flowrun::code_check::{self, Severity, Source};
 use flowrun::config::{self, EnvConfig, FlowConfig};
 use flowrun::engine::{Ctx, Next, Outcome, choose_next, run_step};
 use flowrun::flow::{self, FlowEdge, FlowStep};
@@ -920,6 +921,22 @@ impl Picker {
             .collect();
     }
 
+    /// Tambah baris token utk profil auth baru di flow.yaml TANPA menyentuh
+    /// token yang sudah diketik user (beda dgn `reload_draft`).
+    fn sync_profiles(&mut self) {
+        let profiles = self
+            .cfg
+            .as_ref()
+            .and_then(|c| config::load_flow_config(c).ok())
+            .map(|fc| fc.auth_profiles)
+            .unwrap_or_default();
+        for p in profiles {
+            if !self.tokens.iter().any(|(k, _)| *k == p) {
+                self.tokens.push((p, String::new()));
+            }
+        }
+    }
+
     fn to_env_config(&self) -> EnvConfig {
         let mut env = EnvConfig {
             base_url: self.base_url.trim().to_string(),
@@ -1171,6 +1188,186 @@ impl Editor {
     }
 }
 
+// ========================= editor kode ==========================
+
+#[derive(Clone, Copy, PartialEq, Hash)]
+enum CodeTab {
+    Mmd,
+    Yaml,
+}
+
+impl CodeTab {
+    fn of(src: Source) -> Self {
+        match src {
+            Source::Mmd => CodeTab::Mmd,
+            Source::Yaml => CodeTab::Yaml,
+        }
+    }
+}
+
+/// Tujuan keluar layar Code — menunggu konfirmasi bila ada perubahan.
+#[derive(Clone, Copy, PartialEq)]
+enum CodeLeave {
+    Picker,
+    Visual,
+}
+
+/// Jeda ketik sebelum draft divalidasi ulang + preview di-layout ulang.
+const CODE_RECHECK_DEBOUNCE: Duration = Duration::from_millis(350);
+const CODE_FONT_PX: f32 = 13.0;
+
+/// Layar edit teks mentah `flow.mmd` + `flow.yaml` dengan preview live.
+/// Beda dgn `Editor` (visual): teks disimpan APA ADANYA — komentar, urutan
+/// & format terjaga (Editor menulis ulang canonical via `to_mermaid`).
+struct CodeEditor {
+    mmd_path: PathBuf,
+    /// Default `<dir flow.mmd>/flow.yaml`; dibuat saat save bila belum ada.
+    cfg_path: PathBuf,
+    mmd: String,
+    yaml: String,
+    /// Isi di disk (saat open/save terakhir) — basis dirty & revert.
+    mmd_saved: String,
+    yaml_saved: String,
+    tab: CodeTab,
+    check: code_check::Check,
+    /// Ketikan yang belum divalidasi (debounce).
+    pending_since: Option<Instant>,
+    /// Preview valid terakhir — tetap tampil selama draft .mmd rusak.
+    preview: Option<(flowmaid::model::Graph, Geometry, flowmaid::scene::Scene)>,
+    preview_stale: bool,
+    selected: Option<usize>,
+    /// Node terpilih yang belum punya `steps.<id>` — tawarkan kerangka.
+    missing_step: Option<String>,
+    /// Lompat kursor ke (tab, baris 1-based) di frame berikutnya.
+    jump: Option<(CodeTab, usize)>,
+    leave: Option<CodeLeave>,
+    zoom: f32,
+    pan: egui::Vec2,
+    fitted: bool,
+    status: Option<String>,
+    error: Option<String>,
+}
+
+impl CodeEditor {
+    fn open(mmd_path: PathBuf, cfg_path: Option<PathBuf>) -> anyhow::Result<Self> {
+        let cfg_path = cfg_path.unwrap_or_else(|| mmd_path.with_file_name("flow.yaml"));
+        let mmd = std::fs::read_to_string(&mmd_path).map_err(|e| anyhow::anyhow!("read {}: {e}", mmd_path.display()))?;
+        // flow.yaml belum ada = mulai kosong (config default), bukan error.
+        let yaml = if cfg_path.exists() {
+            std::fs::read_to_string(&cfg_path).map_err(|e| anyhow::anyhow!("read {}: {e}", cfg_path.display()))?
+        } else {
+            String::new()
+        };
+        let mut ce = CodeEditor {
+            mmd_path,
+            cfg_path,
+            mmd_saved: mmd.clone(),
+            yaml_saved: yaml.clone(),
+            mmd,
+            yaml,
+            tab: CodeTab::Mmd,
+            check: code_check::Check::default(),
+            pending_since: None,
+            preview: None,
+            preview_stale: false,
+            selected: None,
+            missing_step: None,
+            jump: None,
+            leave: None,
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+            fitted: false,
+            status: None,
+            error: None,
+        };
+        ce.recheck();
+        Ok(ce)
+    }
+
+    fn dirty_mmd(&self) -> bool {
+        self.mmd != self.mmd_saved
+    }
+
+    fn dirty_yaml(&self) -> bool {
+        self.yaml != self.yaml_saved
+    }
+
+    fn dirty(&self) -> bool {
+        self.dirty_mmd() || self.dirty_yaml()
+    }
+
+    fn recheck(&mut self) {
+        self.pending_since = None;
+        self.check = code_check::check(&self.mmd, &self.yaml);
+        match Editor::parse(&self.mmd) {
+            Ok((graph, geo, scene, _)) => {
+                if self.selected.is_some_and(|i| i >= graph.nodes.len()) {
+                    self.selected = None;
+                }
+                self.preview = Some((graph, geo, scene));
+                self.preview_stale = false;
+            }
+            Err(_) => self.preview_stale = true,
+        }
+    }
+
+    /// Tulis teks mentah apa adanya. Ditolak bila salah satu file gagal
+    /// parse; error validasi (mis. step tak dikenal) tetap boleh disimpan.
+    fn save(&mut self) -> anyhow::Result<()> {
+        self.recheck();
+        if self.check.parse_failed() {
+            anyhow::bail!("fix the parse error(s) first — nothing was written");
+        }
+        if self.dirty_mmd() {
+            std::fs::write(&self.mmd_path, &self.mmd).map_err(|e| anyhow::anyhow!("write {}: {e}", self.mmd_path.display()))?;
+            self.mmd_saved = self.mmd.clone();
+        }
+        if self.dirty_yaml() {
+            std::fs::write(&self.cfg_path, &self.yaml).map_err(|e| anyhow::anyhow!("write {}: {e}", self.cfg_path.display()))?;
+            self.yaml_saved = self.yaml.clone();
+        }
+        let n = self.check.errors();
+        self.status = Some(if n == 0 { "✅ saved".into() } else { format!("✅ saved — {n} error(s) still listed below") });
+        self.error = None;
+        Ok(())
+    }
+
+    fn revert(&mut self) {
+        self.mmd = self.mmd_saved.clone();
+        self.yaml = self.yaml_saved.clone();
+        self.missing_step = None;
+        self.recheck();
+    }
+
+    /// Klik node di preview → lompat ke `steps.<id>` di tab yaml.
+    fn select_node(&mut self, idx: usize) {
+        let Some((graph, _, _)) = &self.preview else { return };
+        let id = graph.nodes[idx].id.clone();
+        self.selected = Some(idx);
+        match code_check::find_step_line(&self.yaml, &id) {
+            Some(line) => {
+                self.tab = CodeTab::Yaml;
+                self.jump = Some((CodeTab::Yaml, line));
+                self.missing_step = None;
+            }
+            None => self.missing_step = Some(id),
+        }
+    }
+
+    fn create_missing_step(&mut self) {
+        let Some(id) = self.missing_step.take() else { return };
+        match code_check::insert_step_skeleton(&self.yaml, &id) {
+            Some((text, line)) => {
+                self.yaml = text;
+                self.tab = CodeTab::Yaml;
+                self.jump = Some((CodeTab::Yaml, line));
+                self.recheck();
+            }
+            None => self.error = Some(format!("`steps:` is written inline in flow.yaml — add steps.{id} by hand")),
+        }
+    }
+}
+
 /// Warna fill node baru sesuai role — sama persis palet `role_color()`,
 /// sebagai hex `NodeStyle.fill` (to_mermaid akan menuliskannya sbg `style
 /// <id> fill:...`).
@@ -1199,6 +1396,7 @@ struct App {
     picker: Picker,
     session: Option<Session>,
     editor: Option<Editor>,
+    code: Option<CodeEditor>,
     timeout: u64,
     reveal_tokens: bool,
 }
@@ -1572,11 +1770,34 @@ impl App {
             Err(e) => self.picker.error = Some(format!("{e:#}")),
         }
     }
+
+    /// Buka layar editor kode (teks mentah flow.mmd + flow.yaml). Selalu
+    /// membaca file terbaru dari disk — sinkron dgn editor visual/run.
+    fn try_code(&mut self) {
+        let Some(f) = self.picker.flow.clone() else {
+            self.picker.error = Some("select flow.mmd first".into());
+            return;
+        };
+        match CodeEditor::open(f, self.picker.cfg.clone()) {
+            Ok(c) => {
+                self.session = None;
+                self.editor = None;
+                self.code = Some(c);
+            }
+            Err(e) => {
+                self.session = None;
+                self.editor = None;
+                self.picker.error = Some(format!("{e:#}"));
+            }
+        }
+    }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
-        if self.session.is_some() {
+        if self.code.is_some() {
+            self.ui_code(ctx);
+        } else if self.session.is_some() {
             self.ui_run(ctx);
         } else if self.editor.is_some() {
             self.ui_editor(ctx);
@@ -1658,6 +1879,19 @@ impl App {
                                         .clicked()
                                     {
                                         self.try_edit();
+                                    }
+                                });
+                                ui.add_space(6.0);
+                                ui.add_enabled_ui(self.picker.flow.is_some(), |ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new("⌨  Edit code (.mmd + .yaml)")
+                                                .min_size(egui::vec2(colw, 34.0)),
+                                        )
+                                        .on_hover_text("edit flow.mmd & flow.yaml as text with a live preview — comments & formatting are kept")
+                                        .clicked()
+                                    {
+                                        self.try_code();
                                     }
                                 });
 
@@ -1989,6 +2223,7 @@ impl App {
 impl App {
     fn ui_run(&mut self, ctx: &egui::Context) {
         let mut back_to_picker = false;
+        let mut open_code = false;
         let sess = self.session.as_mut().expect("dicek pemanggil");
         sess.drain_events();
 
@@ -1998,6 +2233,9 @@ impl App {
             ui.horizontal(|ui| {
                 if ui.button("📂 Open").clicked() {
                     back_to_picker = true;
+                }
+                if ui.button("⌨ Code").on_hover_text("edit flow.mmd & flow.yaml as text (ends this run)").clicked() {
+                    open_code = true;
                 }
                 ui.separator();
                 let can_step = !sess.finished && !sess.auto_running && sess.pending.is_none();
@@ -2738,6 +2976,9 @@ impl App {
         if back_to_picker {
             self.session = None; // Drop → worker Quit
         }
+        if open_code {
+            self.try_code(); // try_code juga men-drop Session
+        }
     }
 }
 
@@ -2746,6 +2987,7 @@ impl App {
 impl App {
     fn ui_editor(&mut self, ctx: &egui::Context) {
         let mut close = false;
+        let mut open_code = false;
         let ed = self.editor.as_mut().expect("checked by caller");
 
         egui::TopBottomPanel::top("edit_bar").show(ctx, |ui| {
@@ -2753,6 +2995,13 @@ impl App {
             ui.horizontal(|ui| {
                 if ui.button("📂  Close").clicked() {
                     close = true;
+                }
+                if ui.button("⌨  Code").on_hover_text("edit flow.mmd & flow.yaml as text").clicked() {
+                    if ed.mmd_dirty || ed.cfg_dirty {
+                        ed.error = Some("save or discard the visual edits first".into());
+                    } else {
+                        open_code = true;
+                    }
                 }
                 ui.separator();
                 if ui.button("＋ Node").clicked() {
@@ -2790,7 +3039,7 @@ impl App {
             if let Some(e) = &ed.error {
                 ui.colored_label(rgb(0xf87171), format!("⚠  {e}"));
             }
-            ui.small("note: saving normalizes .mmd (e.g. classDef/class → per-node style) — original formatting isn't preserved");
+            ui.small("note: saving normalizes .mmd (e.g. classDef/class → per-node style) — original formatting isn't preserved; use ⌨ Code to keep comments");
             ui.add_space(4.0);
         });
 
@@ -2880,93 +3129,12 @@ impl App {
             let (resp, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
             let rect = resp.rect;
 
-            let margin = 40.0;
-            if !ed.fitted && ed.geo.w > 1.0 {
-                let sx = (rect.width() - 2.0 * margin) / ed.geo.w;
-                let sy = (rect.height() - 2.0 * margin) / ed.geo.h;
-                ed.zoom = sx.min(sy).clamp(0.1, 2.0);
-                ed.pan = egui::vec2((rect.width() - ed.geo.w * ed.zoom) / 2.0, (rect.height() - ed.geo.h * ed.zoom) / 2.0);
-                ed.fitted = true;
-            }
+            edit_canvas_view(ui, &resp, &ed.geo, &mut ed.zoom, &mut ed.pan, &mut ed.fitted);
             draw_premium_bg(&painter, rect, ed.pan, ed.zoom);
-
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 && resp.hovered() {
-                if let Some(p) = resp.hover_pos() {
-                    let old = ed.zoom;
-                    ed.zoom = (ed.zoom * (1.0 + scroll * 0.0015)).clamp(0.1, 6.0);
-                    let s = (p - rect.min - ed.pan) / old;
-                    ed.pan = (p - rect.min) - s * ed.zoom;
-                }
-            }
-            if resp.dragged() {
-                ed.pan += resp.drag_delta();
-            }
             let zoom = ed.zoom;
             let base = rect.min + ed.pan;
             let tf = |p: egui::Pos2| base + egui::vec2(p.x * zoom, p.y * zoom);
-
-            // edges + arrowheads (white = selected)
-            for (k, (pts, _src)) in ed.geo.edges.iter().enumerate() {
-                let sel = matches!(ed.selected, Some(EditSel::Edge(i)) if i == k);
-                let col = if sel { rgb(0xf0f4fa) } else { rgb(0x4b5563) };
-                let poly: Vec<egui::Pos2> = pts.iter().map(|&p| tf(p)).collect();
-                if poly.len() >= 2 {
-                    painter.add(egui::Shape::line(poly.clone(), egui::Stroke::new(2.0, col)));
-                    let end = poly[poly.len() - 1];
-                    let prev = poly[poly.len() - 2];
-                    let d = (end - prev).normalized();
-                    if d.length() > 0.1 {
-                        let perp = egui::vec2(-d.y, d.x);
-                        let sz = (7.0 * zoom).clamp(5.0, 14.0);
-                        painter.add(egui::Shape::convex_polygon(
-                            vec![end, end - d * sz + perp * sz * 0.55, end - d * sz - perp * sz * 0.55],
-                            col,
-                            egui::Stroke::NONE,
-                        ));
-                    }
-                }
-            }
-
-            // nodes: fill dari NodeStyle.fill (role saat dibuat, atau
-            // classDef/style hasil parse file lama) — bukan status eksekusi.
-            for sn in &ed.geo.nodes {
-                let c = tf(sn.center);
-                let size = sn.size * zoom;
-                let r = egui::Rect::from_center_size(c, size);
-                let node = &ed.graph.nodes[sn.step];
-                let fill = node.style.fill.as_deref().and_then(parse_hex_color).unwrap_or(rgb(0x3a3f4b));
-                painter.rect_filled(r, egui::Rounding::same(6.0), fill);
-
-                let sel = matches!(ed.selected, Some(EditSel::Node(i)) if i == sn.step);
-                let connecting = ed.connecting_from == Some(sn.step);
-                if connecting {
-                    painter.rect_stroke(r.expand(3.0), egui::Rounding::same(8.0), egui::Stroke::new(3.0, accent()));
-                } else if sel {
-                    painter.rect_stroke(r.expand(2.0), egui::Rounding::same(7.0), egui::Stroke::new(2.0, rgb(0xf0f4fa)));
-                }
-                painter.rect_stroke(r, egui::Rounding::same(6.0), egui::Stroke::new(1.0, rgb(0x14161b)));
-
-                let font_px = 11.0 * zoom;
-                if font_px >= 6.5 {
-                    let font = egui::FontId::proportional(font_px.min(20.0));
-                    let txt_col = rgb(0xffffff);
-                    let make = |rows: usize| {
-                        let mut job = egui::text::LayoutJob::simple(sn.label.clone(), font.clone(), txt_col, size.x - 10.0);
-                        job.wrap.max_rows = rows;
-                        job.wrap.overflow_character = Some('…');
-                        job.halign = egui::Align::Center;
-                        painter.layout_job(job)
-                    };
-                    let mut galley = make(2);
-                    if galley.size().y > size.y - 3.0 {
-                        galley = make(1);
-                    }
-                    if galley.size().y <= size.y - 1.0 {
-                        painter.galley(egui::pos2(c.x, c.y - galley.size().y / 2.0), galley, txt_col);
-                    }
-                }
-            }
+            paint_edit_graph(&painter, &ed.geo, &ed.graph, zoom, tf, ed.selected, ed.connecting_from);
 
             if resp.secondary_clicked() {
                 ed.connect_mode = false;
@@ -3007,6 +3175,580 @@ impl App {
 
         if close {
             self.editor = None;
+        }
+        if open_code {
+            self.try_code();
+        }
+    }
+}
+
+// -------------------------- layar kode --------------------------
+
+impl App {
+    fn ui_code(&mut self, ctx: &egui::Context) {
+        let mut leave_now: Option<CodeLeave> = None;
+        let ce = self.code.as_mut().expect("checked by caller");
+
+        if ce.pending_since.is_some_and(|t| t.elapsed() >= CODE_RECHECK_DEBOUNCE) {
+            ce.recheck();
+        }
+        let save_key = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
+        if ctx.input_mut(|i| i.consume_shortcut(&save_key)) {
+            if let Err(e) = ce.save() {
+                ce.error = Some(format!("{e:#}"));
+            }
+        }
+
+        egui::TopBottomPanel::top("code_bar").show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("📂  Close").clicked() {
+                    ce.leave = Some(CodeLeave::Picker);
+                }
+                if ui
+                    .button("📝  Visual editor")
+                    .on_hover_text("graph editor — note: its save rewrites .mmd canonically (comments dropped)")
+                    .clicked()
+                {
+                    ce.leave = Some(CodeLeave::Visual);
+                }
+                ui.separator();
+                let file_name = |p: &Path| p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                let tabs = [
+                    (CodeTab::Mmd, Source::Mmd, file_name(&ce.mmd_path), ce.dirty_mmd()),
+                    (CodeTab::Yaml, Source::Yaml, file_name(&ce.cfg_path), ce.dirty_yaml()),
+                ];
+                for (tab, src, name, dirty) in tabs {
+                    let n_err = ce.check.diags.iter().filter(|d| d.source == src && d.severity == Severity::Error).count();
+                    let mut txt = name;
+                    if dirty {
+                        txt.push_str(" ●");
+                    }
+                    if n_err > 0 {
+                        txt.push_str(&format!("  ⛔{n_err}"));
+                    }
+                    if ui.selectable_label(ce.tab == tab, egui::RichText::new(txt).monospace()).clicked() {
+                        ce.tab = tab;
+                    }
+                }
+                ui.separator();
+                let dirty = ce.dirty();
+                ui.add_enabled_ui(dirty, |ui| {
+                    if primary_button(ui, "💾  Save", 100.0).on_hover_text("⌘S — writes the text as-is (comments kept)").clicked() {
+                        if let Err(e) = ce.save() {
+                            ce.error = Some(format!("{e:#}"));
+                        }
+                    }
+                });
+                if ui.add_enabled(dirty, egui::Button::new("↺  Revert")).on_hover_text("discard unsaved changes").clicked() {
+                    ce.revert();
+                }
+                if dirty {
+                    ui.colored_label(accent(), "●  unsaved");
+                } else if let Some(s) = &ce.status {
+                    ui.colored_label(rgb(0x22c55e), s.as_str());
+                }
+            });
+            if let Some(e) = &ce.error {
+                ui.colored_label(rgb(0xf87171), format!("⚠  {e}"));
+            }
+            ui.add_space(4.0);
+        });
+
+        egui::TopBottomPanel::bottom("code_diags")
+            .resizable(true)
+            .default_height(130.0)
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("PROBLEMS ({})", ce.check.diags.len())).size(10.5).strong().color(rgb(0x6b7688)));
+                    if ce.pending_since.is_some() {
+                        ui.small("checking…");
+                    }
+                });
+                ui.add_space(2.0);
+                let mut jump: Option<(CodeTab, Option<usize>)> = None;
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    if ce.check.diags.is_empty() {
+                        ui.colored_label(rgb(0x22c55e), "✓  no problems — flow.mmd & flow.yaml are consistent");
+                    }
+                    for d in &ce.check.diags {
+                        let (icon, col) = match d.severity {
+                            Severity::Error => ("⛔", rgb(0xf87171)),
+                            Severity::Warning => ("⚠", accent()),
+                        };
+                        let file = match d.source {
+                            Source::Mmd => "flow.mmd",
+                            Source::Yaml => "flow.yaml",
+                        };
+                        let loc = match d.line {
+                            Some(l) => format!("{file}:{l}"),
+                            None => file.to_string(),
+                        };
+                        let r = ui
+                            .add(
+                                egui::Label::new(egui::RichText::new(format!("{icon}  {loc}  {}", d.message)).monospace().size(12.0).color(col))
+                                    .sense(egui::Sense::click()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if r.clicked() {
+                            jump = Some((CodeTab::of(d.source), d.line));
+                        }
+                    }
+                });
+                if let Some((tab, line)) = jump {
+                    ce.tab = tab;
+                    ce.jump = line.map(|l| (tab, l));
+                }
+            });
+
+        egui::SidePanel::left("code_text")
+            .resizable(true)
+            .default_width(ctx.screen_rect().width() * 0.5)
+            .min_width(320.0)
+            .show(ctx, |ui| {
+                let tab = ce.tab;
+                let font = egui::FontId::monospace(CODE_FONT_PX);
+                let row_h = ui.fonts(|f| f.row_height(&font));
+                let tab_src = match tab {
+                    CodeTab::Mmd => Source::Mmd,
+                    CodeTab::Yaml => Source::Yaml,
+                };
+                let err_lines: BTreeSet<usize> = ce.check.diags.iter().filter(|d| d.source == tab_src).filter_map(|d| d.line).collect();
+                let text_id = egui::Id::new(("code_text", tab));
+                let text = match tab {
+                    CodeTab::Mmd => &mut ce.mmd,
+                    CodeTab::Yaml => &mut ce.yaml,
+                };
+
+                let mut scroll = egui::ScrollArea::both().id_salt(("code_scroll", tab)).auto_shrink([false, false]);
+                if let Some((jt, line)) = ce.jump
+                    && jt == tab
+                {
+                    ce.jump = None;
+                    scroll = scroll.vertical_scroll_offset(((line as f32 - 1.0) * row_h - 120.0).max(0.0));
+                    // Kursor di awal baris tujuan + fokus ke editor.
+                    let char_idx: usize = text.split_inclusive('\n').take(line - 1).map(|l| l.chars().count()).sum();
+                    let mut st = egui::TextEdit::load_state(ui.ctx(), text_id).unwrap_or_default();
+                    let cc = egui::text::CCursor::new(char_idx);
+                    st.cursor.set_char_range(Some(egui::text::CCursorRange::one(cc)));
+                    st.store(ui.ctx(), text_id);
+                    ui.ctx().memory_mut(|m| m.request_focus(text_id));
+                }
+
+                let mut changed = false;
+                scroll.show(ui, |ui| {
+                    let n_lines = text.split_inclusive('\n').count().max(1) + usize::from(text.ends_with('\n'));
+                    let nums = (1..=n_lines).map(|i| format!("{i:>4}")).collect::<Vec<_>>().join("\n");
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.vertical(|ui| {
+                            ui.add_space(4.0);
+                            ui.add(egui::Label::new(egui::RichText::new(nums).font(font.clone()).color(rgb(0x4b5563))).selectable(false));
+                        });
+                        let mut layouter = |ui: &egui::Ui, s: &str, _w: f32| {
+                            let job = code_layout_job(s, tab, &err_lines, font.clone());
+                            ui.fonts(|f| f.layout_job(job))
+                        };
+                        let resp = ui.add(
+                            egui::TextEdit::multiline(text)
+                                .id(text_id)
+                                .code_editor()
+                                .frame(false)
+                                .margin(egui::vec2(10.0, 4.0))
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(40)
+                                .layouter(&mut layouter),
+                        );
+                        changed = resp.changed();
+                    });
+                });
+                if changed {
+                    ce.pending_since = Some(Instant::now());
+                    ce.status = None;
+                }
+            });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(id) = ce.missing_step.clone() {
+                ui.horizontal(|ui| {
+                    ui.colored_label(accent(), format!("node '{id}' has no steps.{id} in flow.yaml — it runs as a manual step"));
+                    if ui.button("＋ Create entry").clicked() {
+                        ce.create_missing_step();
+                    }
+                    if ui.small_button("✕").clicked() {
+                        ce.missing_step = None;
+                    }
+                });
+            }
+            let (resp, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
+            let rect = resp.rect;
+            let mut clicked_node = None;
+            match &ce.preview {
+                None => {
+                    draw_premium_bg(&painter, rect, egui::Vec2::ZERO, 1.0);
+                    painter.text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "fix flow.mmd to see the preview",
+                        egui::FontId::proportional(14.0),
+                        rgb(0x6b7688),
+                    );
+                }
+                Some((graph, geo, scene)) => {
+                    if resp.double_clicked() {
+                        ce.fitted = false;
+                    }
+                    edit_canvas_view(ui, &resp, geo, &mut ce.zoom, &mut ce.pan, &mut ce.fitted);
+                    draw_premium_bg(&painter, rect, ce.pan, ce.zoom);
+                    let zoom = ce.zoom;
+                    let base = rect.min + ce.pan;
+                    let tf = |p: egui::Pos2| base + egui::vec2(p.x * zoom, p.y * zoom);
+                    paint_edit_graph(&painter, geo, graph, zoom, tf, ce.selected.map(EditSel::Node), None);
+                    if resp.clicked()
+                        && let Some(pos) = resp.interact_pointer_pos()
+                    {
+                        let sp = (pos - rect.min - ce.pan) / ce.zoom;
+                        let tol = (6.0 / ce.zoom) as f64;
+                        if let Some(flowmaid::scene::Hit::Node(i)) = scene.hit_test(sp.x as f64, sp.y as f64, tol) {
+                            clicked_node = Some(i);
+                        }
+                    }
+                }
+            }
+            if ce.preview_stale {
+                let r = egui::Rect::from_min_size(rect.left_top() + egui::vec2(10.0, 10.0), egui::vec2(380.0, 26.0));
+                painter.rect_filled(r, egui::Rounding::same(6.0), rgb(0x2a1417));
+                painter.text(
+                    r.left_center() + egui::vec2(10.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    "⚠  flow.mmd has a parse error — showing last valid preview",
+                    egui::FontId::proportional(12.0),
+                    rgb(0xf87171),
+                );
+            }
+            painter.text(
+                rect.left_bottom() + egui::vec2(10.0, -10.0),
+                egui::Align2::LEFT_BOTTOM,
+                "click node → its steps entry · pinch / ⌘+scroll = zoom · scroll / drag = pan · double-click = fit",
+                egui::FontId::proportional(11.0),
+                rgb(0x5c6678),
+            );
+            if let Some(i) = clicked_node {
+                ce.select_node(i);
+            }
+        });
+
+        if let Some(target) = ce.leave {
+            if !ce.dirty() {
+                ce.leave = None;
+                leave_now = Some(target);
+            } else {
+                egui::Window::new("Unsaved changes")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
+                    .show(ctx, |ui| {
+                        ui.label("flow.mmd / flow.yaml have unsaved changes.");
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(!ce.check.parse_failed(), egui::Button::new("💾  Save & leave")).clicked() {
+                                match ce.save() {
+                                    Ok(()) => leave_now = Some(target),
+                                    Err(e) => ce.error = Some(format!("{e:#}")),
+                                }
+                                ce.leave = None;
+                            }
+                            if ui.button("Discard").clicked() {
+                                leave_now = Some(target);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                ce.leave = None;
+                            }
+                        });
+                    });
+            }
+        }
+
+        if ce.pending_since.is_some() {
+            ctx.request_repaint_after(CODE_RECHECK_DEBOUNCE);
+        }
+
+        if let Some(target) = leave_now {
+            let ce = self.code.take().expect("checked above");
+            // flow.yaml bisa baru dibuat / auth_profiles berubah di layar ini.
+            if ce.cfg_path.exists() {
+                self.picker.cfg = Some(ce.cfg_path.clone());
+            }
+            self.picker.sync_profiles();
+            if target == CodeLeave::Visual {
+                match Editor::open(ce.mmd_path, self.picker.cfg.clone()) {
+                    Ok(e) => self.editor = Some(e),
+                    Err(e) => self.picker.error = Some(format!("{e:#}")),
+                }
+            }
+        }
+    }
+}
+
+/// Highlight sederhana editor kode: komentar, keyword/key, `{{var}}`, panah &
+/// label edge mermaid; baris yang punya diagnosa diberi latar merah.
+fn code_layout_job(text: &str, tab: CodeTab, err_lines: &BTreeSet<usize>, font: egui::FontId) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = f32::INFINITY;
+    let err_bg = egui::Color32::from_rgba_unmultiplied(239, 68, 68, 38);
+    for (i, line) in text.split_inclusive('\n').enumerate() {
+        let colors = code_line_colors(line, tab);
+        let background = if err_lines.contains(&(i + 1)) { err_bg } else { egui::Color32::TRANSPARENT };
+        let mut start = 0;
+        for k in 1..=line.len() {
+            let boundary = k == line.len() || (line.is_char_boundary(k) && colors[k] != colors[start]);
+            if boundary {
+                job.append(
+                    &line[start..k],
+                    0.0,
+                    egui::TextFormat {
+                        font_id: font.clone(),
+                        color: colors[start],
+                        background,
+                        ..Default::default()
+                    },
+                );
+                start = k;
+            }
+        }
+    }
+    job
+}
+
+const MMD_KEYWORDS: [&str; 12] = [
+    "flowchart",
+    "graph",
+    "stateDiagram",
+    "stateDiagram-v2",
+    "subgraph",
+    "end",
+    "classDef",
+    "class",
+    "style",
+    "click",
+    "direction",
+    "linkStyle",
+];
+
+/// Warna per-byte satu baris (batas warna selalu di karakter ASCII).
+fn code_line_colors(line: &str, tab: CodeTab) -> Vec<egui::Color32> {
+    let (plain, comment, keyword, arrow, label, var, key) = (
+        rgb(0xd4dae4),
+        rgb(0x6b7688),
+        rgb(0xc084fc),
+        rgb(0x7dd3fc),
+        rgb(0x86efac),
+        rgb(0xfbbf24),
+        rgb(0x93c5fd),
+    );
+    let b = line.as_bytes();
+    let n = b.len();
+    let mut c = vec![plain; n];
+    let indent = line.len() - line.trim_start().len();
+
+    // Akhir bagian kode = awal komentar.
+    let code_end = match tab {
+        CodeTab::Mmd => line.find("%%").unwrap_or(n),
+        CodeTab::Yaml => {
+            let mut quote: Option<u8> = None;
+            let mut end = n;
+            for (k, &ch) in b.iter().enumerate() {
+                match quote {
+                    Some(q) if ch == q => quote = None,
+                    Some(_) => {}
+                    None if ch == b'"' || ch == b'\'' => quote = Some(ch),
+                    None if ch == b'#' && (k == 0 || b[k - 1] == b' ' || b[k - 1] == b'\t') => {
+                        end = k;
+                        break;
+                    }
+                    None => {}
+                }
+            }
+            end
+        }
+    };
+    for x in &mut c[code_end..] {
+        *x = comment;
+    }
+    let code = &b[..code_end];
+
+    match tab {
+        CodeTab::Mmd => {
+            let word_end = code[indent..]
+                .iter()
+                .position(|ch| !(ch.is_ascii_alphanumeric() || *ch == b'-'))
+                .map_or(code.len(), |p| indent + p);
+            if MMD_KEYWORDS.contains(&&line[indent..word_end]) {
+                for x in &mut c[indent..word_end] {
+                    *x = keyword;
+                }
+            }
+            // Panah: run ≥2 dari `-=.<>` yang memuat `-`/`=`.
+            let mut k = 0;
+            while k < code.len() {
+                if b"-=.<>".contains(&code[k]) {
+                    let s = k;
+                    while k < code.len() && b"-=.<>".contains(&code[k]) {
+                        k += 1;
+                    }
+                    if k - s >= 2 && code[s..k].iter().any(|ch| *ch == b'-' || *ch == b'=') {
+                        for x in &mut c[s..k] {
+                            *x = arrow;
+                        }
+                    }
+                } else {
+                    k += 1;
+                }
+            }
+            // Label edge `|...|`.
+            let pipes: Vec<usize> = code.iter().enumerate().filter(|(_, ch)| **ch == b'|').map(|(k, _)| k).collect();
+            for pair in pipes.chunks_exact(2) {
+                for x in &mut c[pair[0]..=pair[1]] {
+                    *x = label;
+                }
+            }
+        }
+        CodeTab::Yaml => {
+            let mut s = indent;
+            if code[s..].starts_with(b"- ") {
+                s += 2;
+            }
+            if let Some(p) = code[s..].iter().position(|ch| *ch == b':')
+                && (s + p + 1 == code.len() || code[s + p + 1].is_ascii_whitespace())
+                && code[s..s + p].iter().all(|ch| ch.is_ascii_alphanumeric() || b"_-.\"'".contains(ch))
+                && p > 0
+            {
+                for x in &mut c[s..s + p] {
+                    *x = key;
+                }
+            }
+        }
+    }
+
+    // `{{var}}` (dua tab).
+    let mut k = 0;
+    while k + 1 < code.len() {
+        if &code[k..k + 2] == b"{{" {
+            if let Some(e) = line[k..code_end].find("}}") {
+                for x in &mut c[k..k + e + 2] {
+                    *x = var;
+                }
+                k += e + 2;
+                continue;
+            }
+        }
+        k += 1;
+    }
+    c
+}
+
+// ===================== helper kanvas edit/preview =====================
+
+/// Fit-sekali + zoom (scroll, berpusat di kursor) + pan (drag) kanvas graf
+/// mentah. Dipakai editor visual & preview editor kode.
+fn edit_canvas_view(ui: &egui::Ui, resp: &egui::Response, geo: &Geometry, zoom: &mut f32, pan: &mut egui::Vec2, fitted: &mut bool) {
+    let rect = resp.rect;
+    let margin = 40.0;
+    if !*fitted && geo.w > 1.0 {
+        let sx = (rect.width() - 2.0 * margin) / geo.w;
+        let sy = (rect.height() - 2.0 * margin) / geo.h;
+        *zoom = sx.min(sy).clamp(0.1, 2.0);
+        *pan = egui::vec2((rect.width() - geo.w * *zoom) / 2.0, (rect.height() - geo.h * *zoom) / 2.0);
+        *fitted = true;
+    }
+    // Sama dgn layar run: pinch / Cmd+scroll → zoom (egui melipat keduanya ke
+    // zoom_delta & membuangnya dari scroll_delta); scroll polos → geser.
+    let (zoom_delta, scroll_vec) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
+    if resp.hovered() {
+        if zoom_delta != 1.0
+            && let Some(p) = resp.hover_pos()
+        {
+            let old = *zoom;
+            *zoom = (*zoom * zoom_delta).clamp(0.1, 6.0);
+            let s = (p - rect.min - *pan) / old;
+            *pan = (p - rect.min) - s * *zoom;
+        } else if scroll_vec != egui::Vec2::ZERO {
+            *pan += scroll_vec;
+        }
+    }
+    if resp.dragged() {
+        *pan += resp.drag_delta();
+    }
+}
+
+/// Gambar edge + node graf mentah. Fill node dari `NodeStyle.fill` (role saat
+/// dibuat, atau classDef/style hasil parse) — bukan status eksekusi.
+fn paint_edit_graph(
+    painter: &egui::Painter,
+    geo: &Geometry,
+    graph: &flowmaid::model::Graph,
+    zoom: f32,
+    tf: impl Fn(egui::Pos2) -> egui::Pos2,
+    selected: Option<EditSel>,
+    connecting_from: Option<usize>,
+) {
+    // edges + arrowheads (white = selected)
+    for (k, (pts, _src)) in geo.edges.iter().enumerate() {
+        let sel = matches!(selected, Some(EditSel::Edge(i)) if i == k);
+        let col = if sel { rgb(0xf0f4fa) } else { rgb(0x4b5563) };
+        let poly: Vec<egui::Pos2> = pts.iter().map(|&p| tf(p)).collect();
+        if poly.len() >= 2 {
+            painter.add(egui::Shape::line(poly.clone(), egui::Stroke::new(2.0, col)));
+            let end = poly[poly.len() - 1];
+            let prev = poly[poly.len() - 2];
+            let d = (end - prev).normalized();
+            if d.length() > 0.1 {
+                let perp = egui::vec2(-d.y, d.x);
+                let sz = (7.0 * zoom).clamp(5.0, 14.0);
+                painter.add(egui::Shape::convex_polygon(
+                    vec![end, end - d * sz + perp * sz * 0.55, end - d * sz - perp * sz * 0.55],
+                    col,
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
+    }
+
+    for sn in &geo.nodes {
+        let c = tf(sn.center);
+        let size = sn.size * zoom;
+        let r = egui::Rect::from_center_size(c, size);
+        let node = &graph.nodes[sn.step];
+        let fill = node.style.fill.as_deref().and_then(parse_hex_color).unwrap_or(rgb(0x3a3f4b));
+        painter.rect_filled(r, egui::Rounding::same(6.0), fill);
+
+        let sel = matches!(selected, Some(EditSel::Node(i)) if i == sn.step);
+        if connecting_from == Some(sn.step) {
+            painter.rect_stroke(r.expand(3.0), egui::Rounding::same(8.0), egui::Stroke::new(3.0, accent()));
+        } else if sel {
+            painter.rect_stroke(r.expand(2.0), egui::Rounding::same(7.0), egui::Stroke::new(2.0, rgb(0xf0f4fa)));
+        }
+        painter.rect_stroke(r, egui::Rounding::same(6.0), egui::Stroke::new(1.0, rgb(0x14161b)));
+
+        let font_px = 11.0 * zoom;
+        if font_px >= 6.5 {
+            let font = egui::FontId::proportional(font_px.min(20.0));
+            let txt_col = rgb(0xffffff);
+            let make = |rows: usize| {
+                let mut job = egui::text::LayoutJob::simple(sn.label.clone(), font.clone(), txt_col, size.x - 10.0);
+                job.wrap.max_rows = rows;
+                job.wrap.overflow_character = Some('…');
+                job.halign = egui::Align::Center;
+                painter.layout_job(job)
+            };
+            let mut galley = make(2);
+            if galley.size().y > size.y - 3.0 {
+                galley = make(1);
+            }
+            if galley.size().y <= size.y - 1.0 {
+                painter.galley(egui::pos2(c.x, c.y - galley.size().y / 2.0), galley, txt_col);
+            }
         }
     }
 }
@@ -3057,6 +3799,7 @@ fn main() -> anyhow::Result<()> {
         picker: Picker::new(),
         session: None,
         editor: None,
+        code: None,
         timeout: args.timeout,
         reveal_tokens: args.reveal_tokens,
     };

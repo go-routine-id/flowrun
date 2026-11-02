@@ -57,8 +57,14 @@ impl Flow {
 pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
     let src = std::fs::read_to_string(mmd_path)
         .with_context(|| format!("read {}", mmd_path.display()))?;
+    load_src(src, cfg).map_err(|e| anyhow::anyhow!("{}: {e:#}", mmd_path.display()))
+}
+
+/// Sama seperti `load`, tapi dari teks di memori — dipakai editor kode GUI
+/// untuk memvalidasi draft yang belum disimpan.
+pub fn load_src(src: String, cfg: FlowConfig) -> Result<Flow> {
     let graph = match flowmaid::parser::parse_document(&src)
-        .map_err(|e| anyhow::anyhow!("parse mermaid {}: {e:?}", mmd_path.display()))?
+        .map_err(|e| anyhow::anyhow!("parse mermaid: {e:?}"))?
     {
         Document::Flowchart(g) | Document::State(g) => g,
         other => bail!(
@@ -67,7 +73,7 @@ pub fn load(mmd_path: &Path, cfg: FlowConfig) -> Result<Flow> {
         ),
     };
     if graph.nodes.is_empty() {
-        bail!("empty flow: no nodes in {}", mmd_path.display());
+        bail!("empty flow: no nodes");
     }
 
     let n = graph.nodes.len();
