@@ -2,7 +2,7 @@
 
 > Dokumen ini ditulis agar sesi Claude (atau engineer) berikutnya bisa lanjut
 > tanpa menggali dari nol. Update dokumen ini setiap kali ada keputusan/fitur besar.
-> Terakhir diperbarui: 21 Okt 2026 (sinkron dgn kode pasca-migrasi laptop: flowmaid 0.27.0, drag node + `flow.layout.yaml`, editor `.mmd`, 26 test).
+> Terakhir diperbarui: 3 Nov 2026 (flowmaid 0.33.0; sebelumnya sinkron pasca-migrasi laptop: drag node + `flow.layout.yaml`, editor `.mmd`, 26 test).
 
 ## Apa ini & filosofi
 
@@ -102,7 +102,7 @@ Jalur cabang diganti tanpa mengubah graf: `--var keputusan=tolak`, `--var pay_mo
 ## Keputusan desain penting (dan alasannya — jangan diulang debatnya)
 
 - **Rust native, bukan web**: keputusan owner. Bonus: tanpa CORS (bukan fetch browser), `--auto` = test CI satu binary.
-- **flowmaid sebagai library**: parse (`parser::parse_document` → `Document::Flowchart(Graph)`), layout+geometri (`scene::scene(&Graph)` → `SceneNode{x,y,w,h}`, `SceneEdge{bezier/waypoints}`), `render_svg`. `Graph.direction` bisa dioverride (LR/TD) sebelum `scene()`. Juga dipakai: `fold::scene_compact` (Ular), `Scene::hit_test` (pick), `scene::route_partial` (drag), `to_mermaid` (editor tulis ulang `.mmd`). Versi terpasang **0.27.0** (crates.io, naik dari 0.20.1 pada 21 Okt 2026; CLI+GUI compile tanpa ubah kode, 26 test hijau).
+- **flowmaid sebagai library**: parse (`parser::parse_document` → `Document::Flowchart(Graph)`), layout+geometri (`scene::scene(&Graph)` → `SceneNode{x,y,w,h}`, `SceneEdge{bezier/waypoints}`), `render_svg`. `Graph.direction` bisa dioverride (LR/TD) sebelum `scene()`. Juga dipakai: `fold::scene_compact` (Ular), `Scene::hit_test` (pick), `scene::route_partial` (drag), `to_mermaid` (editor tulis ulang `.mmd`). Versi terpasang **0.33.0** (crates.io; 0.20.1 → 0.27.0 pada 21 Okt 2026, → 0.33.0 pada 3 Nov 2026 — keduanya CLI+GUI compile tanpa ubah kode, 26 test hijau, smoke 3 contoh vs mock identik).
 - **Lisensi GPL-3.0-or-later** — konsekuensi link ke flowmaid (GPL). Sadari ini bila mau relicense.
 - **Layout Ular** = kebutuhan flowrun (sejak flowmaid ≥0.18 dikerjakan `fold::scene_compact`, bukan grid tangan lagi): layout berlapis (Sugiyama — flowmaid & mermaid.js sama) merender rantai linear sebagai pita panjang; serpentine melipatnya agar muat layar. Hanya valid utk graf linear (`Flow.linear`) — otomatis disembunyikan utk graf bercabang.
 - **Semantik cabang**: kondisi di label edge (`var == nilai` / `!=`; `else`/kosong = fallback). Tepat satu true → jalan; ambigu → GUI bertanya, `--auto` FAIL (test tak boleh menebak). Satu jalur aktif; **fan-out paralel sengaja ditunda** (merge context vars ribet, kebutuhan belum nyata).
